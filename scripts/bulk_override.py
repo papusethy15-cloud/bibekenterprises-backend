@@ -158,7 +158,7 @@ async def run(domain_slug: str, json_path: str, dry_run: bool, only_service: str
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bulk upsert domain-service overrides from JSON")
-    parser.add_argument("--domain",  required=True, help="Domain slug, e.g. bibeke-nterprises")
+    parser.add_argument("--domain",  required=True, help="Domain slug, e.g. bibek-enterprises")
     parser.add_argument("--file",    required=True, help="Path to override JSON file")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--service", default=None, help="Only update services matching this name substring")
