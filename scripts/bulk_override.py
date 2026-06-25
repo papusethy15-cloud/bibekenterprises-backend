@@ -8,7 +8,7 @@ Usage (run from the backend folder):
     python scripts/bulk_override.py --domain bibekenterprises --file scripts/overrides/bibekenterprises.json --dry-run
 
 Options:
-    --domain   Domain slug (e.g. bibekenterprises)
+    --domain   Domain slug (e.g. bibeke-nterprises)
     --file     Path to the override JSON file
     --dry-run  Print what would be updated without writing to the database
     --service  (optional) Only process one service by name substring match
@@ -158,7 +158,7 @@ async def run(domain_slug: str, json_path: str, dry_run: bool, only_service: str
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bulk upsert domain-service overrides from JSON")
-    parser.add_argument("--domain",  required=True, help="Domain slug, e.g. bibekenterprises")
+    parser.add_argument("--domain",  required=True, help="Domain slug, e.g. bibeke-nterprises")
     parser.add_argument("--file",    required=True, help="Path to override JSON file")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--service", default=None, help="Only update services matching this name substring")

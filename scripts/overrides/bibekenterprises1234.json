@@ -1,0 +1,124 @@
+{
+  "_comment": "Bulk override data for domain: bibekenterprises",
+  "_instructions": [
+    "service_name must exactly match the global service name (case-insensitive, partial match supported)",
+    "image_url / thumbnail_url: skip these keys if you upload images manually via the admin dashboard",
+    "includes: list of strings — what the service covers",
+    "excludes: list of strings — what is NOT covered",
+    "faqs: list of {q, a} objects",
+    "SEO fields: meta_title, meta_description, meta_keywords, og_title, og_description, og_image_url",
+    "Any field you omit is left unchanged in the database"
+  ],
+  "services": [
+    {
+      "service_name": "Gas Charging",
+      "meta_title": "Gas Charging Service | Bibek Enterprises",
+      "meta_description": "Professional AC gas charging and refilling service at your doorstep. Transparent pricing, certified technicians, 30-day warranty.",
+      "meta_keywords": "gas charging, AC gas refill, refrigerant refill, AC service, Bibek Enterprises",
+      "og_title": "Book AC Gas Charging — Bibek Enterprises",
+      "og_description": "Fast doorstep AC gas charging by certified technicians. Transparent pricing, 30-day warranty.",
+      "includes": [
+        "Refrigerant gas refill (R22 / R32 / R410A as applicable)",
+        "Gas pressure check and top-up",
+        "Leak detection before filling",
+        "AC cooling performance test after refill",
+        "Technician visit charges included"
+      ],
+      "excludes": [
+        "Major pipe leakage repair (charged separately)",
+        "Compressor repair or replacement",
+        "Gas refill for more than one unit (billed per unit)",
+        "Outdoor unit mounting or dismounting"
+      ],
+      "faqs": [
+        {
+          "q": "How do I know if my AC needs gas charging?",
+          "a": "Signs include the AC blowing warm air, longer cooling time than usual, ice formation on pipes, or hissing sounds. Our technician will do a pressure check to confirm."
+        },
+        {
+          "q": "Which type of gas does your technician use?",
+          "a": "We use the manufacturer-recommended refrigerant — R22 for older units, R32 or R410A for modern inverter ACs. The correct type is confirmed before filling."
+        },
+        {
+          "q": "How long does the gas charging service take?",
+          "a": "Typically 45–90 minutes depending on the unit size and condition. If a leak is found, repair time may add 30–60 minutes."
+        },
+        {
+          "q": "Does gas leak again after charging?",
+          "a": "Gas should not leak if there is no physical damage. We check for leaks before and after charging. Our 30-day warranty covers any issue arising from the service."
+        }
+      ]
+    },
+    {
+      "service_name": "AC Service",
+      "meta_title": "AC Service & Maintenance | Bibek Enterprises",
+      "meta_description": "Complete AC servicing including deep cleaning, filter wash, coil cleaning, and performance check. Book online — doorstep service.",
+      "meta_keywords": "AC service, air conditioner service, AC maintenance, AC cleaning, Bibek Enterprises",
+      "og_title": "Book AC Service — Bibek Enterprises",
+      "og_description": "Deep cleaning, filter wash, coil cleaning, and performance check for all AC brands. 30-day warranty.",
+      "includes": [
+        "Indoor unit filter cleaning and wash",
+        "Evaporator coil cleaning (foam wash)",
+        "Outdoor unit fin cleaning",
+        "Drain pipe clearing",
+        "Cooling performance verification",
+        "Electrical connection inspection"
+      ],
+      "excludes": [
+        "Gas charging (billed separately if required)",
+        "Part replacement",
+        "Outdoor unit high-pressure jet cleaning (add-on)",
+        "AC installation or uninstallation"
+      ],
+      "faqs": [
+        {
+          "q": "How often should I service my AC?",
+          "a": "At least once a year, ideally before summer. If used heavily, twice a year is recommended for optimal performance and longevity."
+        },
+        {
+          "q": "Will the technician clean the outdoor unit too?",
+          "a": "Yes, the service includes basic outdoor unit fin cleaning. Deep jet cleaning of the outdoor unit is available as an add-on."
+        },
+        {
+          "q": "How long does AC servicing take?",
+          "a": "Around 60–90 minutes for a standard split AC. Multi-head or commercial units may take longer."
+        }
+      ]
+    },
+    {
+      "service_name": "AC Repair",
+      "meta_title": "AC Repair Service | Bibek Enterprises",
+      "meta_description": "Expert AC repair for all brands — cooling issues, electrical faults, compressor problems, and more. Same-day service available.",
+      "meta_keywords": "AC repair, air conditioner repair, AC not cooling, compressor repair, Bibek Enterprises",
+      "og_title": "Book AC Repair — Bibek Enterprises",
+      "og_description": "Same-day AC repair by certified technicians. All brands, all models. 30-day service warranty.",
+      "includes": [
+        "Diagnosis and fault identification",
+        "Minor electrical repair (fuse, capacitor, thermostat)",
+        "PCB inspection",
+        "Post-repair performance test",
+        "30-day repair warranty"
+      ],
+      "excludes": [
+        "Compressor replacement (quoted separately)",
+        "Gas charging (billed separately)",
+        "Spare parts cost (charged at actuals)",
+        "Installation or re-installation"
+      ],
+      "faqs": [
+        {
+          "q": "What AC brands do you repair?",
+          "a": "We repair all major brands including LG, Samsung, Voltas, Daikin, Hitachi, Blue Star, Carrier, Whirlpool, and more."
+        },
+        {
+          "q": "Is the repair cost included in the visit charge?",
+          "a": "The visit and diagnosis charge is included. Additional repair costs (parts or labour) are quoted transparently before work begins — no surprise billing."
+        },
+        {
+          "q": "Do you offer same-day AC repair?",
+          "a": "Yes, same-day service is available in most cities. Book before noon for highest same-day availability."
+        }
+      ]
+    }
+  ]
+}

@@ -273,7 +273,7 @@ async def get_platform_public(db: AsyncSession = Depends(get_db)):
 async def profile_complete(current_user=Depends(AnyStaff), db: AsyncSession = Depends(get_db)):
     """Returns whether the minimum required platform settings are filled."""
     data = await _get_group(db, "platform")
-    required = ["app_name", "support_email", "logo_url"]
+    required = ["app_name", "support_email"]
     missing = [k for k in required if not data.get(k)]
     return success_response(data={
         "complete": len(missing) == 0,
