@@ -1,8 +1,12 @@
+import asyncio
+from app.core.background_tasks import track_task
+import json
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from uuid import UUID
 import random, string
+from app.websocket.manager import publish_event, WSEvent, booking_room, ADMIN_BOOKINGS_ROOM
 
 from app.core.database import get_db
 from app.models.booking import Booking, BookingStatus, BookingStatusLog, BookingSource
@@ -14,10 +18,11 @@ from app.models.quotation import Quotation as QuotationModel, QuotationServiceIt
 from app.api.v1.schemas.booking import (
     CreateBookingRequest, UpdateBookingRequest,
     RescheduleBookingRequest, AssignTechnicianRequest,
-    CancelBookingRequest
+    CancelBookingRequest, SubmitInspectionRequest, VisitingChargeRequest
 )
 from app.api.deps import AdminOrCCO, AnyAuthenticated
 from app.utils.response import success_response
+from app.utils.notify import push_to_technician
 
 router = APIRouter()
 
@@ -47,6 +52,179 @@ async def _cancel_booking(db: AsyncSession, booking: Booking, user_id: str, reas
     booking.status = BookingStatus.CANCELLED
     booking.cancelled_reason = reason
     await _add_status_log(db, booking.id, BookingStatus.CANCELLED, user_id, reason)
+    track_task(publish_event(booking_room(str(booking.id)), WSEvent.BOOKING_STATUS_CHANGED,
+        {"booking_id": str(booking.id), "booking_number": booking.booking_number, "status": "CANCELLED"}))
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED,
+        {"booking_id": str(booking.id), "booking_number": booking.booking_number, "status": "CANCELLED"}))
+
+# ── AUTO-ASSIGN HELPER ────────────────────────────────────────
+async def _maybe_auto_assign(booking_id_str: str, booking_number: str, triggered_by_user_id: str) -> None:
+    """
+    Background task: check auto_assign_enabled setting and, if ON, assign
+    the booking to the best available ONLINE technician.
+
+    IMPORTANT: Opens its OWN database session — the request session is
+    already closed by the time this coroutine runs via ensure_future.
+
+    Checks performed:
+      1. auto_assign_enabled == 'true'
+      2. booking has service_id (needed for skill scoring)
+      3. At least one ACTIVE + ONLINE technician exists
+      4. Picks best via score (skill, rating, workload, GPS proximity)
+      5. Applies assignment → WS events + FCM push + starts timeout watcher
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    from app.core.database import AsyncSessionLocal
+    from app.models.system_setting import SystemSetting
+    from app.models.assignment import AssignmentHistory, AssignmentStatus, AssignmentType
+    from app.models.technician import Technician as _Tech, TechnicianStatus
+    from app.api.v1.routes.assignments import (
+        _get_default_rules, _apply_assignment, _timeout_watcher,
+    )
+    from uuid import UUID as _UUID
+
+    async with AsyncSessionLocal() as db:
+        try:
+            # 1. Read auto_assign_enabled setting
+            setting_row = (await db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.group == "dispatch",
+                    SystemSetting.key == "auto_assign_enabled",
+                )
+            )).scalar_one_or_none()
+            enabled = (setting_row.value if setting_row else "true").strip().lower()
+            if enabled != "true":
+                _logger.info(f"Auto-assign OFF — skipping booking {booking_number}")
+                return
+
+            # 2. Reload booking from fresh session
+            booking = (await db.execute(
+                select(Booking).where(Booking.id == _UUID(booking_id_str))
+            )).scalar_one_or_none()
+            if not booking:
+                _logger.warning(f"Auto-assign: booking {booking_number} not found")
+                return
+
+            # 3. Need service_id for skill matching
+            if not booking.service_id:
+                _logger.info(f"Auto-assign skipped — booking {booking_number} has no service_id")
+                return
+
+            # 4. Must have at least one online technician
+            online_count = (await db.execute(
+                select(func.count(_Tech.id)).where(
+                    _Tech.status == TechnicianStatus.ACTIVE,
+                    _Tech.is_online == True,
+                )
+            )).scalar_one()
+            if online_count == 0:
+                _logger.info(f"Auto-assign skipped — no online technicians for booking {booking_number}")
+                return
+
+            # 5. Get rules + pick best online technician
+            rules = await _get_default_rules(db)
+            score, technician, workload = await _pick_best_technician_online(db, booking, rules)
+
+            _logger.info(f"Auto-assign: booking {booking_number} → technician {technician.name} (score={score:.1f})")
+
+            # 6. Apply assignment (commits, fires WS + FCM)
+            await _apply_assignment(
+                db, booking, technician, AssignmentType.AUTO,
+                triggered_by_user_id,
+                "Auto-assigned on booking creation",
+                score,
+                rules.response_timeout_minutes,
+            )
+
+            # 7. Start timeout watcher
+            _created_asgn = (await db.execute(
+                select(AssignmentHistory).where(
+                    AssignmentHistory.booking_id == booking.id,
+                    AssignmentHistory.technician_id == technician.id,
+                    AssignmentHistory.status == AssignmentStatus.ASSIGNED,
+                ).order_by(AssignmentHistory.created_at.desc())
+            )).scalars().first()
+            if _created_asgn:
+                track_task(_timeout_watcher(
+                    str(_created_asgn.id),
+                    booking_id_str,
+                    str(technician.id),
+                    rules.response_timeout_minutes,
+                ))
+
+        except Exception as _e:
+            _logger.warning(f"Auto-assign failed for booking {booking_number}: {_e}", exc_info=True)
+
+
+async def _pick_best_technician_online(db: AsyncSession, booking: "Booking", rules):
+    """
+    Variant of _pick_best_technician that restricts candidates to is_online=True technicians.
+    Falls back silently if none qualify — caller handles the HTTPException.
+    """
+    from app.models.technician import Technician as _Tech, TechnicianSkill, TechnicianStatus
+    from app.models.customer import CustomerAddress
+    from app.api.v1.routes.assignments import _haversine_km, _get_active_workload, ACTIVE_BOOKING_STATUSES
+    from fastapi import HTTPException
+    import math
+
+    technicians = (
+        await db.execute(
+            select(_Tech).where(
+                _Tech.status == TechnicianStatus.ACTIVE,
+                _Tech.is_online == True,
+            )
+        )
+    ).scalars().all()
+    if not technicians:
+        raise HTTPException(status_code=404, detail="No online technicians")
+
+    skill_rows = (
+        await db.execute(select(TechnicianSkill).where(TechnicianSkill.service_id == booking.service_id))
+    ).scalars().all()
+    skill_match_ids = {row.technician_id for row in skill_rows}
+
+    if rules.require_skill_match:
+        technicians = [t for t in technicians if t.id in skill_match_ids]
+        if not technicians:
+            raise HTTPException(status_code=404, detail="No online technician with required skill")
+
+    address = None
+    _booking_lat, _booking_lng = None, None
+    if booking.address_id:
+        address = (await db.execute(select(CustomerAddress).where(CustomerAddress.id == booking.address_id))).scalar_one_or_none()
+        if address and getattr(address, 'latitude', None) and getattr(address, 'longitude', None):
+            _booking_lat, _booking_lng = address.latitude, address.longitude
+
+    if rules.prefer_same_city and address:
+        same_city = [t for t in technicians if t.city and t.city.lower() == address.city.lower()]
+        if same_city:
+            technicians = same_city
+
+    scored = []
+    for tech in technicians:
+        workload = await _get_active_workload(db, tech.id)
+        if workload >= rules.max_active_bookings:
+            continue
+        score = 0.0
+        if tech.id in skill_match_ids:
+            score += 50
+        if rules.prefer_high_rating:
+            score += tech.rating * 20
+        if rules.prefer_low_workload:
+            score += max(0, 30 - workload * 10)
+        score += max(0, 20 - (tech.total_jobs or 0) * 0.1)
+        if _booking_lat and _booking_lng and tech.last_lat and tech.last_lng:
+            dist_km = _haversine_km(tech.last_lat, tech.last_lng, _booking_lat, _booking_lng)
+            score += max(0, 30 - dist_km)
+        scored.append((score, tech, workload))
+
+    if not scored:
+        raise HTTPException(status_code=404, detail="No available online technician")
+
+    scored.sort(key=lambda item: (item[0], item[1].rating, -item[2]), reverse=True)
+    return scored[0]
+
 
 # ── CREATE BOOKING ─────────────────────────────────────────────
 @router.post("", summary="Create a new booking [Customer/CCO/Admin]")
@@ -70,29 +248,59 @@ async def create_booking(
             raise HTTPException(status_code=404, detail="Customer profile not found")
 
     # ── Duplicate booking check ────────────────────────────────────────────────
-    # Same customer + same service + same address + active (non-cancelled/completed) booking → block
+    # Rule: same customer + same SERVICE CATEGORY + same address + active booking → block.
+    #
+    # Rationale:
+    #   • "Same service + same address" is too strict — customers may legitimately book
+    #     a "Washing Machine Deep Clean" and a "Washing Machine Repair" at the same address.
+    #   • "Same category + same address" is the right boundary: e.g. if you already have
+    #     an active "AC Services" booking at your home address, you can't book another
+    #     "AC Services" job there until the first one completes/is cancelled.
+    #   • Different category (e.g. AC Services vs Washing Machine) at the same address
+    #     is always allowed — these are independent jobs.
+    #   • Re-booking is always allowed once a booking reaches a terminal status:
+    #     COMPLETED, CANCELLED, PAID, CLOSED, SETTLED, REFUND_INITIATED.
     if customer and not payload.force_duplicate and payload.service_id and payload.address_id:
-        # Terminal statuses where re-booking the same service+address SHOULD be allowed.
-        # COMPLETED = work done + payment confirmed (customer view of done).
-        # PAID, CLOSED, SETTLED = internal admin/commission settlement steps — customer is done.
-        # CANCELLED = customer or admin cancelled, always allow re-booking.
-        # INVOICE_GENERATED, PAYMENT_PENDING = payment stage — still in-flight, block re-booking.
+        from app.models.service import Service as _Service
+        # Terminal statuses — job is done or abandoned; customer may re-book freely.
         REBOOKABLE_STATUSES = [
             BookingStatus.COMPLETED,
             BookingStatus.CANCELLED,
             BookingStatus.PAID,
             BookingStatus.CLOSED,
             BookingStatus.SETTLED,
+            BookingStatus.REFUND_INITIATED,
         ]
-        dup_q = select(Booking).where(
-            Booking.customer_id == customer.id,
-            Booking.service_id == UUID(payload.service_id),
-            Booking.address_id == UUID(payload.address_id),
-            Booking.status.notin_(REBOOKABLE_STATUSES)
-        )
-        duplicate = (await db.execute(dup_q)).scalar_one_or_none()
-        if duplicate:
-            raise HTTPException(status_code=409, detail=f"DUPLICATE:{duplicate.booking_number}:{duplicate.status.value}")
+        # Resolve the category_id of the service being booked now.
+        _incoming_svc = (await db.execute(
+            select(_Service).where(_Service.id == UUID(payload.service_id))
+        )).scalar_one_or_none()
+        _incoming_category_id = _incoming_svc.category_id if _incoming_svc else None
+
+        if _incoming_category_id:
+            # Find any active booking for this customer at this address in the SAME category.
+            # We JOIN Booking → Service to get the category of each existing booking's service.
+            dup_q = (
+                select(Booking)
+                .join(_Service, _Service.id == Booking.service_id)
+                .where(
+                    Booking.customer_id == customer.id,
+                    Booking.address_id == UUID(payload.address_id),
+                    _Service.category_id == _incoming_category_id,
+                    Booking.status.notin_(REBOOKABLE_STATUSES),
+                )
+            )
+            duplicate = (await db.execute(dup_q)).scalar_one_or_none()
+            if duplicate:
+                from app.models.service import ServiceCategory as _Cat
+                _cat = (await db.execute(
+                    select(_Cat).where(_Cat.id == _incoming_category_id)
+                )).scalar_one_or_none()
+                _cat_name = _cat.name if _cat else "this category"
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"DUPLICATE:{duplicate.booking_number}:{duplicate.status.value}:{_cat_name}"
+                )
 
     # Fetch service for pricing/name (service_id is optional for chatbot/web bookings)
     from app.models.service import Service
@@ -128,6 +336,34 @@ async def create_booking(
         if _cpn:
             _cpn.used_count = (_cpn.used_count or 0) + 1
 
+    # ── Resolve city_id ────────────────────────────────────────────────────
+    from app.models.city import City as CityModel
+    from app.models.domain import DomainCity
+    resolved_city_id: UUID | None = None
+    if payload.city_id:
+        resolved_city_id = UUID(payload.city_id)
+    elif payload.city and payload.domain_id:
+        # Try to find a city linked to this domain that matches the city name
+        dc_row = (await db.execute(
+            select(DomainCity, CityModel)
+            .join(CityModel, CityModel.id == DomainCity.city_id)
+            .where(
+                DomainCity.domain_id == UUID(payload.domain_id),
+                DomainCity.is_active == True,
+                CityModel.is_active == True,
+                CityModel.name.ilike(payload.city),
+            )
+        )).first()
+        if dc_row:
+            resolved_city_id = dc_row.CityModel.id
+    elif payload.city:
+        # Fallback: match city by name globally
+        city_row = (await db.execute(
+            select(CityModel).where(CityModel.name.ilike(payload.city), CityModel.is_active == True)
+        )).scalar_one_or_none()
+        if city_row:
+            resolved_city_id = city_row.id
+
     booking = Booking(
         booking_number=generate_booking_number(),
         customer_id=customer.id if customer else UUID(current_user["user_id"]),
@@ -136,6 +372,7 @@ async def create_booking(
         address_id=UUID(payload.address_id) if payload.address_id else None,
         address_line=payload.address_line,
         city=payload.city,
+        city_id=resolved_city_id,
         scheduled_date=sched_date,
         scheduled_slot=payload.scheduled_slot,
         notes=payload.notes,
@@ -156,6 +393,11 @@ async def create_booking(
     await db.flush()
     await _add_status_log(db, booking.id, BookingStatus.CONFIRMED, current_user["user_id"], "Booking created by admin/CCO")
     await db.commit()
+    await db.refresh(booking)
+
+    # ── Auto-assign: fire-and-forget in background with its own DB session ──
+    track_task(_maybe_auto_assign(str(booking.id), booking.booking_number, current_user["user_id"]))
+
     return success_response(data={"id": str(booking.id), "booking_number": booking.booking_number, "status": booking.status.value}, message="Booking created")
 
 # ── LIST BOOKINGS ──────────────────────────────────────────────
@@ -198,9 +440,13 @@ async def list_bookings(
         else:
             q = q.where(Booking.id == None)
 
-    # Filters
+    # Filters — status supports single value OR comma-separated list
     if status:
-        q = q.where(Booking.status == BookingStatus(status))
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if len(statuses) == 1:
+            q = q.where(Booking.status == BookingStatus(statuses[0]))
+        elif len(statuses) > 1:
+            q = q.where(Booking.status.in_([BookingStatus(s) for s in statuses]))
     if priority:
         q = q.where(Booking.priority == priority)
     if search:
@@ -218,20 +464,17 @@ async def list_bookings(
     if date_to:
         q = q.where(Booking.scheduled_date <= datetime.fromisoformat(date_to))
 
-    # Count using same joined + filtered query
-    count_q = select(func.count(Booking.id)).select_from(
-        select(Booking, Customer, Service, Technician, Domain)
-        .outerjoin(Customer, Customer.id == Booking.customer_id)
-        .outerjoin(Service, Service.id == Booking.service_id)
-        .outerjoin(Technician, Technician.id == Booking.technician_id)
-        .outerjoin(Domain, Domain.id == Booking.domain_id)
-        .filter(q.whereclause)
-        .subquery()
-    ) if q.whereclause is not None else select(func.count(Booking.id)).select_from(Booking)
+    # Count using the same fully-scoped query (role filters + status filters applied).
+    # Wrap q as a subquery and count from it so role-based WHERE clauses
+    # (e.g. customer_id = <this customer>) are preserved in the count.
     try:
+        count_subq = q.subquery()
+        count_q = select(func.count()).select_from(count_subq)
         total = (await db.execute(count_q)).scalar_one()
     except Exception:
-        total = len((await db.execute(q)).all())
+        # Fallback: fetch all IDs and count in Python (never loses scope)
+        id_rows = (await db.execute(q.with_only_columns(Booking.id))).all()
+        total = len(id_rows)
 
     rows = (await db.execute(
         q.order_by(Booking.created_at.desc()).offset((page-1)*per_page).limit(per_page)
@@ -257,11 +500,13 @@ async def list_bookings(
             "customer_code": cust.customer_code if cust else "—",
             "technician_name": tech.name if tech else None,
             "technician_mobile": tech.mobile if tech else None,
+            "technician_confirmed": b.status.value in ("ACCEPTED", "EN_ROUTE", "ARRIVED", "INSPECTING", "IN_PROGRESS", "COMPLETED", "INVOICE_GENERATED", "PAYMENT_PENDING", "PAID", "CLOSED", "SETTLED"),  # False when ASSIGNED = dispatched but not yet accepted
             "appliance_brand": b.appliance_brand or None,
             "appliance_model": b.appliance_model or None,
             "notes": b.notes or None,
             "cancelled_reason": b.cancelled_reason or None,
             "city": b.city or None,
+            "city_id": str(b.city_id) if b.city_id else None,
             "coupon_code": b.coupon_code,
             "coupon_discount": b.coupon_discount or 0.0,
             "domain_name": domain.name if domain else None,
@@ -383,8 +628,16 @@ async def track_booking(
     if booking_id:
         query = query.where(Booking.booking_number == booking_id.strip().upper())
     elif phone:
+        try:
+            from app.utils.phone import normalize_mobile
+            normalized_phone = normalize_mobile(phone)
+        except Exception:
+            # Public endpoint -- don't 422 on a malformed phone, just fall
+            # back to a raw match (won't find a normalized record, but
+            # won't crash the lookup either).
+            normalized_phone = phone.strip()
         matched_customer = (
-            await db.execute(select(Customer).where(Customer.mobile == phone.strip()))
+            await db.execute(select(Customer).where(Customer.mobile == normalized_phone))
         ).scalar_one_or_none()
         if not matched_customer:
             raise HTTPException(status_code=404, detail="Booking not found")
@@ -491,7 +744,11 @@ async def get_booking(booking_id: UUID, current_user: dict = Depends(AnyAuthenti
         "cancelled_reason": b.cancelled_reason,
         "domain_name": domain.name if domain else None,
         "domain_id": str(b.domain_id) if b.domain_id else None,
+        "city_id": str(b.city_id) if b.city_id else None,
         "created_at": b.created_at.isoformat() if b.created_at else None,
+        "inspection_notes": b.inspection_notes,
+        "inspection_photos": (json.loads(b.inspection_photos) if b.inspection_photos else []),
+        "customer_rating": await _get_booking_customer_rating(db, b.id),
     })
 
 # ── UPDATE BOOKING ─────────────────────────────────────────────
@@ -523,6 +780,10 @@ async def reschedule_booking(booking_id: UUID, payload: RescheduleBookingRequest
     booking.status = BookingStatus.RESCHEDULED
     await _add_status_log(db, booking.id, BookingStatus.RESCHEDULED, current_user["user_id"], payload.reason)
     await db.commit()
+    track_task(publish_event(booking_room(str(booking.id)), WSEvent.BOOKING_STATUS_CHANGED,
+        {"booking_id": str(booking.id), "booking_number": booking.booking_number, "status": "RESCHEDULED"}))
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED,
+        {"booking_id": str(booking.id), "booking_number": booking.booking_number, "status": "RESCHEDULED"}))
     return success_response(message="Booking rescheduled")
 
 # ── ASSIGN TECHNICIAN ──────────────────────────────────────────
@@ -576,6 +837,18 @@ async def _transition(booking_id: UUID, new_status: BookingStatus, current_user:
     booking.status = new_status
     await _add_status_log(db, booking.id, new_status, current_user["user_id"], notes)
     await db.commit()
+    # -- Broadcast the transition so customer/admin live-tracking screens update --
+    try:
+        _trans_payload = {
+            "booking_id":     str(booking.id),
+            "booking_number": booking.booking_number,
+            "status":         new_status.value,
+            "notes":          notes,
+        }
+        track_task(publish_event(booking_room(str(booking.id)), WSEvent.BOOKING_STATUS_CHANGED, _trans_payload))
+        track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED, _trans_payload))
+    except Exception:
+        pass
     return success_response(data={"status": new_status.value}, message=f"Status updated to {new_status.value}")
 
 @router.post("/{booking_id}/accept",           summary="Accept booking [Technician]")
@@ -586,6 +859,10 @@ async def accept(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: Asy
 async def reject(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     return await _transition(booking_id, BookingStatus.PENDING, cu, db, "Rejected — reassigning")
 
+@router.post("/{booking_id}/en-route",          summary="Technician on the way")
+async def en_route(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
+    return await _transition(booking_id, BookingStatus.EN_ROUTE, cu, db, "Technician on the way")
+
 @router.post("/{booking_id}/arrived",          summary="Technician arrived")
 async def arrived(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     return await _transition(booking_id, BookingStatus.ARRIVED, cu, db, "Technician arrived at location")
@@ -594,9 +871,213 @@ async def arrived(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: As
 async def start_inspection(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     return await _transition(booking_id, BookingStatus.INSPECTING, cu, db, "Inspection started")
 
+@router.post("/{booking_id}/submit-inspection", summary="Submit inspection report and start work [Technician]")
+async def submit_inspection(
+    booking_id: UUID,
+    payload: SubmitInspectionRequest,
+    cu: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Technician submits inspection findings (notes + photo URLs) and
+    transitions the booking from INSPECTING → IN_PROGRESS.
+    Inspection data is persisted on the booking row.
+    """
+    import json as _json
+    booking = await _get_booking_or_404(db, booking_id)
+    if not booking.technician_id:
+        raise HTTPException(status_code=400, detail="No technician assigned to this booking.")
+    if booking.status not in (BookingStatus.INSPECTING, BookingStatus.ARRIVED):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot submit inspection: booking is in {booking.status.value} status. Expected INSPECTING or ARRIVED."
+        )
+    booking.inspection_notes  = payload.notes.strip() if payload.notes else None
+    booking.inspection_photos = _json.dumps(payload.photo_urls) if payload.photo_urls else None
+    booking.status = BookingStatus.IN_PROGRESS
+    await _add_status_log(
+        db, booking.id, BookingStatus.IN_PROGRESS, cu["user_id"],
+        f"Inspection submitted — {len(payload.photo_urls)} photo(s). Notes: {payload.notes[:200] if payload.notes else 'none'}"
+    )
+    await db.commit()
+    return success_response(
+        data={"status": BookingStatus.IN_PROGRESS.value},
+        message="Inspection submitted — work started",
+    )
+
 @router.post("/{booking_id}/start-work",       summary="Start work")
 async def start_work(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     return await _transition(booking_id, BookingStatus.IN_PROGRESS, cu, db, "Work started")
+
+@router.post("/{booking_id}/visiting-charge", summary="Initiate visiting charge — technician arrived but customer declined repair [Technician]")
+async def initiate_visiting_charge(
+    booking_id: UUID,
+    payload: VisitingChargeRequest,
+    cu: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    When a technician has arrived / inspected but the customer does not want the repair:
+    1. Creates a special VISITING CHARGE quotation (auto-approved, service item = 'Visiting Charge')
+    2. Generates an invoice directly from it
+    3. Sets booking status → PENDING_VERIFICATION (awaiting admin to close as CLOSED)
+
+    Expected payload:
+        { "amount": 150.0, "notes": "Customer declined repair after inspection" }
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    from app.models.quotation import Quotation as QuotationModel, QuotationStatus, QuotationServiceItem
+    from app.models.invoice import Invoice, InvoiceStatus, InvoiceType
+
+    # ── Validate booking ──────────────────────────────────────────────────────
+    booking = await _get_booking_or_404(db, booking_id)
+    allowed_statuses = (
+        BookingStatus.ARRIVED,
+        BookingStatus.INSPECTING,
+        BookingStatus.IN_PROGRESS,
+    )
+    if booking.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Visiting charge can only be initiated when status is ARRIVED, INSPECTING, or IN_PROGRESS. Current: {booking.status.value}",
+        )
+
+    # ── Validate amount ───────────────────────────────────────────────────────
+    amount = float(payload.amount or 0)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Visiting charge amount must be greater than zero.")
+
+    notes = str(payload.notes or "Customer declined repair — visiting charge applied").strip()
+
+    # ── Guard: no approved quotation should exist (that would mean customer agreed) ──
+    from app.models.quotation import Quotation as _Q, QuotationStatus as _QS
+    approved_q = (await db.execute(
+        select(_Q).where(
+            _Q.booking_id == booking.id,
+            _Q.is_active == True,
+            _Q.status == _QS.APPROVED,
+        )
+    )).scalars().first()
+    if approved_q:
+        raise HTTPException(
+            status_code=400,
+            detail="A quotation is already approved for this booking — use the normal repair workflow to complete work.",
+        )
+
+    # ── Number helpers ────────────────────────────────────────────────────────
+    def _qnum():
+        return "QTN" + _dt.utcnow().strftime("%Y%m%d%H%M%S%f")[-12:]
+
+    def _inum():
+        suffix = _dt.utcnow().strftime("%Y%m%d%H%M%S%f")[-10:]
+        return f"INV{suffix}"
+
+    # ── Create visiting-charge quotation (pre-approved) ───────────────────────
+    tax_amount = round(amount * 0.18, 2)
+    total = round(amount + tax_amount, 2)
+
+    quotation = QuotationModel(
+        quotation_number=_qnum(),
+        booking_id=booking.id,
+        domain_id=booking.domain_id,
+        created_by=UUID(cu["user_id"]),
+        status=QuotationStatus.APPROVED,          # auto-approved
+        labour_charges=0.0,
+        service_charges=amount,
+        services_total=amount,
+        parts_total=0.0,
+        discount_amount=0.0,
+        adjustment_amount=0.0,
+        subtotal_amount=amount,
+        tax_percent=18.0,
+        tax_amount=tax_amount,
+        total_amount=total,
+        tax_mode="B2C",
+        remarks=f"Visiting Charge — {notes}",
+        submitted_at=_dt.utcnow(),
+        approved_at=_dt.utcnow(),
+        approved_by=UUID(cu["user_id"]),
+    )
+    db.add(quotation)
+    await db.flush()  # get quotation.id
+
+    # Service line item
+    svc_item = QuotationServiceItem(
+        quotation_id=quotation.id,
+        service_name="Visiting Charge",
+        appliance_label=notes,          # store reason in appliance_label (nullable text)
+        quantity=1,
+        unit_price=amount,
+        total_price=amount,
+        is_pending_verify=0,
+    )
+    db.add(svc_item)
+
+    # ── Generate invoice directly ─────────────────────────────────────────────
+    invoice = Invoice(
+        invoice_number=_inum(),
+        booking_id=booking.id,
+        domain_id=booking.domain_id,
+        quotation_id=quotation.id,
+        generated_by=UUID(cu["user_id"]),
+        invoice_type=InvoiceType.GST_B2C,
+        status=InvoiceStatus.GENERATED,
+        taxable_amount=amount,
+        cgst_amount=round(tax_amount / 2, 2),
+        sgst_amount=round(tax_amount / 2, 2),
+        igst_amount=0.0,
+        total_amount=total,
+        balance_amount=total,
+        notes=f"Visiting Charge — {notes}",
+    )
+    db.add(invoice)
+    await db.flush()
+
+    # Mark quotation as converted
+    quotation.status = QuotationStatus.CONVERTED_TO_INVOICE
+
+    # ── Update booking → PENDING_VERIFICATION ────────────────────────────────
+    booking.status = BookingStatus.PENDING_VERIFICATION
+    booking.total_amount = total
+    booking.base_amount = amount
+    booking.gst_amount = tax_amount
+    booking.cancelled_reason = notes  # store reason in cancelled_reason for visibility
+
+    await _add_status_log(
+        db, booking.id, BookingStatus.PENDING_VERIFICATION, cu["user_id"],
+        f"Visiting charge initiated — ₹{total:.2f}. Awaiting admin verification. {notes}"
+    )
+
+    await db.commit()
+
+    # Broadcast so admin / customer live screens update
+    try:
+        await publish_event(booking_room(str(booking.id)), WSEvent.BOOKING_STATUS_CHANGED, {
+            "booking_id": str(booking.id),
+            "status": BookingStatus.PENDING_VERIFICATION.value,
+        })
+        await publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED, {
+            "booking_id": str(booking.id),
+            "status": BookingStatus.PENDING_VERIFICATION.value,
+        })
+    except Exception:
+        pass
+
+    return success_response(
+        data={
+            "status": BookingStatus.PENDING_VERIFICATION.value,
+            "quotation_id": str(quotation.id),
+            "quotation_number": quotation.quotation_number,
+            "invoice_id": str(invoice.id),
+            "invoice_number": invoice.invoice_number,
+            "amount": amount,
+            "tax_amount": tax_amount,
+            "total_amount": total,
+        },
+        message=f"Visiting charge of ₹{total:.2f} initiated — booking sent for admin verification",
+    )
+
 
 @router.post("/{booking_id}/complete-work",    summary="Complete work")
 async def complete_work(booking_id: UUID, cu: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
@@ -737,6 +1218,10 @@ from pydantic import BaseModel as _BM
 from typing import Optional as _Opt
 from datetime import datetime as _dt
 
+def _generate_customer_code():
+    return "CUS" + ''.join(random.choices(string.digits, k=6))
+
+
 class PublicBookingRequest(_BM):
     customer_name:   str
     mobile:          str
@@ -762,15 +1247,42 @@ async def public_create_booking(
     Finds or creates a customer record by mobile, then creates a PENDING booking
     using free-text service_name + address fields (admin resolves to FK later).
     """
-    # Find or create customer by mobile
-    result = await db.execute(select(Customer).where(Customer.mobile == payload.mobile))
-    customer = result.scalar_one_or_none()
+    from app.utils.phone import normalize_mobile
+    from app.models.user import User, UserRole
+
+    # BUG FIX: normalize to the same canonical +91XXXXXXXXXX form used by the
+    # customer app / admin dashboard / OTP login, so the same physical phone
+    # number never creates a second, duplicate User+Customer pair just
+    # because this form was submitted as "7894697718" instead of
+    # "+917894697718".
+    mobile = normalize_mobile(payload.mobile)
+
+    customer = (await db.execute(select(Customer).where(Customer.mobile == mobile))).scalar_one_or_none()
 
     if not customer:
+        # BUG FIX: this previously created a Customer row with no user_id at
+        # all, but customers.user_id is NOT NULL + a unique FK to users.id --
+        # that insert would fail for any genuinely new public-website
+        # customer. Create (or reuse) the linked User first, same as the
+        # admin "Add Customer" flow does.
+        user = (await db.execute(select(User).where(User.mobile == mobile))).scalar_one_or_none()
+        if not user:
+            user = User(
+                name=payload.customer_name,
+                mobile=mobile,
+                email=payload.email,
+                role=UserRole.CUSTOMER,
+                is_verified=False,
+            )
+            db.add(user)
+            await db.flush()
+
         customer = Customer(
+            user_id=user.id,
             name=payload.customer_name,
-            mobile=payload.mobile,
+            mobile=mobile,
             email=payload.email,
+            customer_code=_generate_customer_code(),
         )
         db.add(customer)
         await db.flush()
@@ -780,12 +1292,20 @@ async def public_create_booking(
     except ValueError:
         sched_dt = _dt.utcnow()
 
+    # Resolve city_id from city name for public bookings
+    from app.models.city import City as CityModel
+    _pub_city_row = (await db.execute(
+        select(CityModel).where(CityModel.name.ilike(payload.city), CityModel.is_active == True)
+    )).scalar_one_or_none()
+    pub_city_id = _pub_city_row.id if _pub_city_row else None
+
     booking = Booking(
         booking_number=generate_booking_number(),
         customer_id=customer.id,
         service_name=payload.service_name,
         address_line=payload.address,
         city=payload.city,
+        city_id=pub_city_id,
         pincode=payload.pincode,
         scheduled_date=sched_dt,
         scheduled_slot=payload.scheduled_slot,
@@ -799,6 +1319,22 @@ async def public_create_booking(
     await db.flush()
     await _add_status_log(db, booking.id, BookingStatus.PENDING, notes="Public website booking")
     await db.commit()
+    await db.refresh(booking)
+
+    # ── Auto-assign if enabled — background task with own DB session ──
+    track_task(_maybe_auto_assign(str(booking.id), booking.booking_number, str(booking.id)))
+
+    # ── WS: notify admin room of new website booking ──
+    _new_bkg_payload = {
+        "booking_id":     str(booking.id),
+        "booking_number": booking.booking_number,
+        "customer_name":  customer.name,
+        "customer_mobile": customer.mobile,
+        "service_name":   booking.service_name,
+        "city":           booking.city,
+        "status":         booking.status.value,
+    }
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_CREATED, _new_bkg_payload))
 
     return success_response(
         data={"booking_number": booking.booking_number, "id": str(booking.id)},
@@ -1017,6 +1553,7 @@ async def settle_booking(
         BookingStatus.COMPLETED, BookingStatus.INVOICE_GENERATED,
         BookingStatus.PAYMENT_PENDING, BookingStatus.PAID,
         BookingStatus.QUOTATION_APPROVED,
+        BookingStatus.PENDING_VERIFICATION,  # visiting charge flow: tech collected cash, admin verifies & closes
     }
     if booking.status not in _SETTLEABLE:
         raise HTTPException(status_code=400, detail=f"Cannot settle booking in {booking.status.value} state.")
@@ -1151,6 +1688,28 @@ async def settle_booking(
     await _add_status_log(db, booking.id, BookingStatus.CLOSED, current_user["user_id"], settlement_note)
     await db.commit()
 
+    # ── WebSocket: notify admin + technician rooms ───────────────────────
+    _settle_payload = {
+        "booking_id":     str(booking_id),
+        "booking_number": booking.booking_number,
+        "status":         booking.status.value,
+        "total_commission": total_commission,
+    }
+    from app.websocket.manager import ADMIN_BOOKINGS_ROOM, booking_room, technician_room, WSEvent
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED, _settle_payload))
+    track_task(publish_event(booking_room(str(booking_id)), WSEvent.BOOKING_STATUS_CHANGED, _settle_payload))
+    # Also fire PAYMENT_COLLECTED for notification system
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.PAYMENT_COLLECTED, _settle_payload))
+    # ── Notify technician (FCM + notification record) ─────────────────────
+    if tech:
+        track_task(push_to_technician(
+            db=db, technician=tech,
+            title="Booking Settled 🎉",
+            body=f"Booking {booking.booking_number} has been settled. Commission ₹{total_commission:.2f} credited to your wallet.",
+            notif_type="PAYMENT",
+            data={"type": "BOOKING_SETTLED", "booking_id": str(booking_id)},
+        ))
+        track_task(publish_event(technician_room(str(tech.id)), WSEvent.BOOKING_STATUS_CHANGED, _settle_payload))
     return success_response(
         data={
             "status": booking.status.value,
@@ -1174,7 +1733,7 @@ async def close_booking(
 ):
     """Legacy simple close — use /settle for full commission engine."""
     booking = await _get_booking_or_404(db, booking_id)
-    if booking.status not in [BookingStatus.PAID, BookingStatus.PAYMENT_PENDING, BookingStatus.COMPLETED, BookingStatus.INVOICE_GENERATED]:
+    if booking.status not in [BookingStatus.PAID, BookingStatus.PAYMENT_PENDING, BookingStatus.COMPLETED, BookingStatus.INVOICE_GENERATED, BookingStatus.PENDING_VERIFICATION]:
         raise HTTPException(status_code=400, detail=f"Cannot close booking in {booking.status.value} state.")
     booking.status = BookingStatus.CLOSED
     settlement_note = f"Closed by {current_user.get('email', 'admin')}. {notes or ''}".strip()
@@ -1215,3 +1774,107 @@ async def approve_quotation_for_booking(
                          f"Quotation approved by admin/CCO ({current_user.get('email', '')}). Work can now start.")
     await db.commit()
     return success_response(data={"status": booking.status.value}, message="Quotation approved — work can begin")
+
+
+
+async def _get_booking_customer_rating(db, booking_id):
+    """Returns {rating, review} dict if customer has rated this booking, else None."""
+    from app.models.technician import TechnicianRating
+    row = (await db.execute(
+        select(TechnicianRating.rating, TechnicianRating.review)
+        .where(TechnicianRating.booking_id == booking_id)
+    )).first()
+    if not row:
+        return None
+    return {"rating": row.rating, "review": row.review}
+
+
+# ── CUSTOMER RATE BOOKING ──────────────────────────────────────
+@router.post("/{booking_id}/rate", summary="Customer rates technician after completion")
+async def rate_booking(
+    booking_id: UUID,
+    payload: dict,
+    current_user: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Customer submits a star rating (1-5) and optional review text for a
+    completed booking.  Persists into technician_ratings and updates the
+    technician's rolling average rating on the technicians table.
+
+    Only the booking's own customer may call this; only COMPLETED / PAID /
+    CLOSED / SETTLED bookings are eligible.  A booking can only be rated
+    once — a second call returns 400.
+    """
+    from app.models.technician import TechnicianRating, Technician as TechModel
+    from sqlalchemy import delete as sa_delete
+
+    rating_val = payload.get("rating")
+    review_text = payload.get("review", "")
+
+    if rating_val is None or not (1 <= float(rating_val) <= 5):
+        raise HTTPException(status_code=422, detail="rating must be between 1 and 5")
+
+    booking = await _get_booking_or_404(db, booking_id)
+
+    # Ownership check — customers can only rate their own bookings
+    if current_user.get("role") == "CUSTOMER":
+        cust = (await db.execute(
+            select(Customer).where(Customer.user_id == UUID(current_user["user_id"]))
+        )).scalar_one_or_none()
+        if not cust or booking.customer_id != cust.id:
+            raise HTTPException(status_code=403, detail="Not your booking")
+
+    # Only rate completed/paid/closed/settled bookings
+    rateable = {BookingStatus.COMPLETED, BookingStatus.PAID, BookingStatus.CLOSED, BookingStatus.SETTLED}
+    if booking.status not in rateable:
+        raise HTTPException(status_code=400, detail=f"Booking cannot be rated in status {booking.status.value}")
+
+    if not booking.technician_id:
+        raise HTTPException(status_code=400, detail="No technician assigned to this booking")
+
+    # Idempotency — only one rating per booking
+    existing = (await db.execute(
+        select(TechnicianRating).where(TechnicianRating.booking_id == booking_id)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="This booking has already been rated")
+
+    # Persist the rating row
+    cust_row = (await db.execute(
+        select(Customer).where(Customer.user_id == UUID(current_user["user_id"]))
+    )).scalar_one_or_none() if current_user.get("role") == "CUSTOMER" else None
+
+    new_rating = TechnicianRating(
+        technician_id=booking.technician_id,
+        booking_id=booking_id,
+        customer_id=cust_row.id if cust_row else None,
+        rating=float(rating_val),
+        review=review_text or None,
+    )
+    db.add(new_rating)
+
+    # Update technician's rolling average rating
+    tech = (await db.execute(
+        select(TechModel).where(TechModel.id == booking.technician_id)
+    )).scalar_one_or_none()
+    if tech:
+        total_count = (await db.execute(
+            select(func.count(TechnicianRating.id)).where(
+                TechnicianRating.technician_id == booking.technician_id
+            )
+        )).scalar_one() or 0
+        total_sum = (await db.execute(
+            select(func.sum(TechnicianRating.rating)).where(
+                TechnicianRating.technician_id == booking.technician_id
+            )
+        )).scalar_one() or 0.0
+        # +1 for the new row being added
+        new_avg = (total_sum + float(rating_val)) / (total_count + 1)
+        tech.rating = round(new_avg, 2)
+
+    await db.commit()
+    return success_response(
+        data={"rating": float(rating_val), "review": review_text},
+        message="Thank you for your feedback!"
+    )
