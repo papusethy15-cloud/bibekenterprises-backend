@@ -41,24 +41,28 @@ async def run_async_migrations():
 
 def _maybe_stamp_baseline(connection):
     """
-    Handles two legacy VPS states:
+    Ensures the VPS alembic_version table is in a state where
+    `alembic upgrade head` will correctly apply migration 047.
 
-    State A — no alembic_version table at all (DB pre-dates Alembic):
-        Stamp at 046 so upgrade() only runs 047+.
+    The VPS DB was bootstrapped before proper Alembic tracking was in place.
+    Over several fix attempts the alembic_version table may contain various
+    combinations of revision IDs — none of which include '047'.
 
-    State B — alembic_version has only the original auto-generated revisions
-        (91baaab49547 / fc36bebf9204) but NOT the numbered chain (001→047).
-        This happens when the app was first deployed with just those two
-        auto-generated migrations, then the numbered chain was added later
-        but the VPS was never re-migrated.  Alembic sees 91baaab49547 and
-        fc36bebf9204 as the current heads and considers everything up to date,
-        so upgrade() runs ZERO migrations even though 001-047 were never applied.
-        Fix: replace the old head entries with 046 so upgrade() runs only 047+.
+    Strategy: if the DB already has the real schema (users table exists) AND
+    '047' is not yet recorded as applied, clear whatever is in alembic_version
+    and stamp at '046'. This guarantees upgrade() will run exactly 047 and
+    nothing else, regardless of what legacy IDs are currently present.
     """
     from sqlalchemy import text
 
+    # FINAL_MIGRATION is the migration that adds all missing VPS columns.
+    # Once it is stamped, this function becomes a permanent no-op.
+    FINAL_MIGRATION = '047'
+    STAMP_AT        = '046'  # one step before FINAL_MIGRATION
+
     has_version_table = connection.execute(text(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'alembic_version')"
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'alembic_version')"
     )).scalar()
 
     current_versions = set()
@@ -66,38 +70,36 @@ def _maybe_stamp_baseline(connection):
         rows = connection.execute(text("SELECT version_num FROM alembic_version")).fetchall()
         current_versions = {r[0] for r in rows}
 
-    has_users = connection.execute(text(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')"
-    )).scalar()
-
-    # The OLD auto-generated revision IDs that predate the numbered chain
-    OLD_AUTO_REVISIONS = {'91baaab49547', 'fc36bebf9204'}
-    # The numbered chain head — if this is present, the chain has been applied
-    NUMBERED_HEAD = '047'
-
-    if not has_users:
-        return  # Fresh empty DB — let Alembic run everything normally
-
-    if not has_version_table or not current_versions:
-        # State A: schema exists but zero Alembic tracking
-        print("[INFO] env.py: DB has schema but no alembic_version — stamping baseline at 046")
-        if not has_version_table:
-            connection.execute(text(
-                "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, "                "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
-            ))
-        connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('046')"))
-        connection.commit()
-        print("[INFO] env.py: stamped at 046")
+    # Already done — nothing to fix
+    if FINAL_MIGRATION in current_versions:
         return
 
-    if current_versions == OLD_AUTO_REVISIONS or current_versions.issubset(OLD_AUTO_REVISIONS):
-        # State B: only the old auto-generated revisions are present, numbered chain missing
-        print(f"[INFO] env.py: found legacy revision IDs {current_versions} — replacing with numbered chain baseline")
-        for old_rev in current_versions:
-            connection.execute(text(f"DELETE FROM alembic_version WHERE version_num = '{old_rev}'"))
-        connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('046')"))
-        connection.commit()
-        print("[INFO] env.py: replaced legacy IDs with 046, upgrade will now apply only new migrations (047+)")
+    has_users = connection.execute(text(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'users')"
+    )).scalar()
+
+    # Fresh empty DB — let Alembic run everything from scratch normally
+    if not has_users:
+        return
+
+    # DB has real schema but 047 has not been applied yet.
+    # Whatever is currently in alembic_version, replace it with STAMP_AT
+    # so upgrade() will run only 047.
+    print(f"[INFO] env.py: 047 not yet applied (current={current_versions}) — resetting to {STAMP_AT}")
+
+    if not has_version_table:
+        connection.execute(text(
+            "CREATE TABLE alembic_version "
+            "(version_num VARCHAR(32) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+        ))
+    else:
+        connection.execute(text("DELETE FROM alembic_version"))
+
+    connection.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{STAMP_AT}')"))
+    connection.commit()
+    print(f"[INFO] env.py: alembic_version reset to {STAMP_AT} — upgrade will now run 047")
 
 
 def do_run_migrations(connection):
