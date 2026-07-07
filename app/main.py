@@ -23,6 +23,7 @@ async def _auto_migrate():
         try:
             from alembic.config import Config
             from alembic import command as alembic_cmd
+            from sqlalchemy import create_engine, text
 
             # Locate alembic.ini relative to the backend root
             backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,21 +33,47 @@ async def _auto_migrate():
                 print(f"[WARN] Auto-migrate: alembic.ini not found at {ini_path}")
                 return
 
+            # IMPORTANT: Do NOT use cfg.set_main_option() — the DB password
+            # contains %-encoded chars (e.g. %40, %23) which configparser treats
+            # as interpolation syntax and raises ValueError.
+            # env.py reads settings.DATABASE_URL directly, so no URL override needed.
             cfg = Config(ini_path)
 
-            # IMPORTANT: Do NOT use cfg.set_main_option() to set the DB URL.
-            # The password contains %-encoded chars (e.g. %40, %23) which
-            # Python's configparser treats as interpolation syntax and raises:
-            #   ValueError: invalid interpolation syntax in '...' at position N
-            # Instead, patch the env.py lookup by setting the URL as an
-            # attribute on the config object that our env.py reads directly,
-            # then call upgrade. Since our env.py now reads _DB_URL from
-            # settings directly (not from cfg), no override is needed here.
-            # We just need a valid Config object pointing at alembic.ini.
-            #
-            # env.py builds _DB_URL = settings.DATABASE_URL.replace(...) itself,
-            # so alembic_cmd.upgrade(cfg, "head") will work without any URL override.
-            from app.core.config import settings  # noqa — ensure settings loaded
+            # ── Detect "tables exist but Alembic version is missing" ──────────
+            # This happens when the VPS DB was set up before Alembic tracking was
+            # introduced.  Running upgrade() from scratch would try to CREATE TABLE
+            # on tables that already exist → DuplicateTableError.
+            # Fix: stamp the DB at the last migration that predates the current
+            # schema, so Alembic skips all the already-applied migrations and only
+            # runs the genuinely new ones (030, 039, 047, etc.).
+            from app.core.config import settings
+            sync_url = settings.DATABASE_URL.replace("+asyncpg", "").replace("postgresql+asyncpg", "postgresql")
+            _engine = create_engine(sync_url)
+            with _engine.connect() as conn:
+                # Check if alembic_version table exists
+                has_version_table = conn.execute(text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "                    "WHERE table_name = 'alembic_version')"
+                )).scalar()
+                current_versions = set()
+                if has_version_table:
+                    rows = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
+                    current_versions = {r[0] for r in rows}
+
+                # Check if core tables already exist (indicates pre-Alembic setup)
+                has_users = conn.execute(text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "                    "WHERE table_name = 'users')"
+                )).scalar()
+            _engine.dispose()
+
+            if has_users and not current_versions:
+                # DB has the full schema but no Alembic tracking.
+                # Stamp at 'a1b2c3d4e5f6' (add_technician_extended_fields) which
+                # is the last migration before the gap migrations (030, 039, 047).
+                # This tells Alembic: "everything up to here is already applied",
+                # so upgrade() will only run the missing column migrations.
+                print("[INFO] Auto-migrate: DB has schema but no Alembic version — stamping to known baseline")
+                alembic_cmd.stamp(cfg, "046")
+                print("[INFO] Auto-migrate: stamped at 046, will now apply remaining migrations")
 
             alembic_cmd.upgrade(cfg, "head")
             print("[OK] Auto-migrate: all Alembic migrations applied (head)")
