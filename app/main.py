@@ -23,6 +23,10 @@ async def _auto_migrate():
         try:
             from alembic.config import Config
             from alembic import command as alembic_cmd
+            from app.core.config import settings as _s
+            import re as _re
+            _safe_url = _re.sub(r':([^:@]+)@', ':***@', _s.DATABASE_URL)
+            print(f"[INFO] Auto-migrate: connecting to {_safe_url}")
 
             # Locate alembic.ini relative to the backend root
             backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -1,5 +1,9 @@
 from pydantic_settings import BaseSettings
 from typing import List
+import os
+
+# Absolute path to .env — works regardless of PM2/uvicorn working directory
+_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
 
 class Settings(BaseSettings):
     APP_NAME: str = "Palei Solutions"
@@ -33,6 +37,6 @@ class Settings(BaseSettings):
 
     SENTRY_DSN: str = ""
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": _ENV_FILE, "extra": "ignore"}
 
 settings = Settings()
