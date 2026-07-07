@@ -25,6 +25,9 @@ email-validator==2.1.1
 # Storage
 minio==7.2.7
 
+# Payments
+razorpay==2.0.1
+
 # PDF Generation
 reportlab==4.2.0
 
