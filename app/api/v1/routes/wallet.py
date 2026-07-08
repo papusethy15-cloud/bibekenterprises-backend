@@ -377,9 +377,9 @@ async def admin_list_withdrawal_requests(
         rows.append({
             "id": str(wr.id),
             "technician_id": str(wr.technician_id),
-            "technician_name": f"{user_r.first_name or ''} {user_r.last_name or ''}".strip() if user_r else "Unknown",
-            "technician_code": tech.employee_code if tech else None,
-            "technician_mobile": user_r.mobile if user_r else None,
+            "technician_name": user_r.name if user_r else "Unknown",
+            "technician_code": tech.technician_code if tech else None,
+            "technician_mobile": tech.mobile if tech else None,
             "amount": wr.amount,
             "status": wr.status,
             "upi_id": wr.upi_id,
@@ -474,14 +474,22 @@ async def admin_list_settlements(
     from app.models.booking import Booking, BookingStatus
     from app.models.commission import Commission
     from app.models.technician import Technician
+    from app.models.customer import Customer
     from app.models.user import User
-    from sqlalchemy import func
+    from sqlalchemy import func, or_
 
-    q = select(Booking).where(Booking.status == BookingStatus.CLOSED)
-    count_q = select(func.count(Booking.id)).where(Booking.status == BookingStatus.CLOSED)
+    # Include both CLOSED and SETTLED bookings on the settlements page
+    status_filter = or_(
+        Booking.status == BookingStatus.CLOSED,
+        Booking.status == BookingStatus.SETTLED,
+    )
+    q = select(Booking).where(status_filter)
+    count_q = select(func.count(Booking.id)).where(status_filter)
+
+    # Booking model uses technician_id (not assigned_technician_id)
     if technician_id:
-        q = q.where(Booking.assigned_technician_id == UUID(technician_id))
-        count_q = count_q.where(Booking.assigned_technician_id == UUID(technician_id))
+        q = q.where(Booking.technician_id == UUID(technician_id))
+        count_q = count_q.where(Booking.technician_id == UUID(technician_id))
 
     total = (await db.execute(count_q)).scalar_one()
     bookings_r = await db.execute(
@@ -491,36 +499,48 @@ async def admin_list_settlements(
 
     rows = []
     for b in bookings:
-        tech, user = None, None
-        if b.assigned_technician_id:
-            tech_r = await db.execute(select(Technician).where(Technician.id == b.assigned_technician_id))
+        tech, tech_user = None, None
+        if b.technician_id:
+            tech_r = await db.execute(select(Technician).where(Technician.id == b.technician_id))
             tech = tech_r.scalar_one_or_none()
             if tech:
                 user_r = await db.execute(select(User).where(User.id == tech.user_id))
-                user = user_r.scalar_one_or_none()
+                tech_user = user_r.scalar_one_or_none()
+
+        # Fetch customer name + mobile via Customer join
+        customer_name, customer_mobile = None, None
+        if b.customer_id:
+            cust_r = await db.execute(select(Customer).where(Customer.id == b.customer_id))
+            cust = cust_r.scalar_one_or_none()
+            if cust:
+                customer_name   = cust.name
+                customer_mobile = cust.mobile
 
         # Fetch commissions for this booking
+        # Commission model uses commission_amount (not amount)
         comm_r = await db.execute(select(Commission).where(Commission.booking_id == b.id))
         comms = comm_r.scalars().all()
-        total_commission = sum(c.amount or 0 for c in comms)
+        total_commission = sum(c.commission_amount or 0 for c in comms)
         comm_status = comms[0].status if comms else None
         comm_paid = all(c.status == "PAID" for c in comms) if comms else False
 
         rows.append({
-            "booking_id": str(b.id),
-            "booking_number": b.booking_number,
-            "customer_name": b.customer_name,
-            "customer_mobile": b.customer_mobile,
-            "total_amount": b.final_amount or b.quoted_amount or 0,
-            "technician_id": str(b.assigned_technician_id) if b.assigned_technician_id else None,
-            "technician_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unassigned",
-            "technician_code": tech.employee_code if tech else None,
-            "commission_total": total_commission,
+            "booking_id":       str(b.id),
+            "booking_number":   b.booking_number,
+            "customer_name":    customer_name,
+            "customer_mobile":  customer_mobile,
+            # Booking model uses total_amount; fall back to 0
+            "total_amount":     b.total_amount or 0,
+            "technician_id":    str(b.technician_id) if b.technician_id else None,
+            # User model has .name (not first_name/last_name)
+            "technician_name":  tech_user.name if tech_user else (tech.name if tech else "Unassigned"),
+            "technician_code":  tech.technician_code if tech else None,
+            "commission_total": round(total_commission, 2),
             "commission_count": len(comms),
             "commission_status": comm_status,
-            "commission_paid": comm_paid,
-            "settled_at": b.updated_at.isoformat() if b.updated_at else None,
-            "created_at": b.created_at.isoformat() if b.created_at else None,
+            "commission_paid":  comm_paid,
+            "settled_at":  b.updated_at.isoformat() if b.updated_at else None,
+            "created_at":  b.created_at.isoformat() if b.created_at else None,
         })
 
     return success_response(data={

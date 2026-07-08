@@ -671,6 +671,41 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 app.include_router(ws_router)  # WebSocket endpoints (no prefix — uses /ws/... paths)
 
 
+# ── Global 500 handler ────────────────────────────────────────────────────────
+# FastAPI's CORSMiddleware only injects Access-Control-Allow-Origin on
+# responses it processes normally.  When an unhandled exception produces a 500,
+# Starlette's ServerErrorMiddleware fires *before* CORS can add its headers,
+# so the browser sees a CORS error instead of the real 500.  This handler runs
+# inside the middleware stack (after CORS), so the CORS headers are already
+# present on the request object by the time we return a JSONResponse — but we
+# add them explicitly here as a belt-and-suspenders safety net so the browser
+# always receives them, even during a crash.
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    import logging, traceback
+    logging.getLogger("uvicorn.error").error(
+        "Unhandled exception: %s\n%s", exc, traceback.format_exc()
+    )
+    origin = request.headers.get("origin", "")
+    cors_headers: dict = {}
+    if origin in settings.ALLOWED_ORIGINS:
+        cors_headers = {
+            "Access-Control-Allow-Origin":      origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods":     "*",
+            "Access-Control-Allow-Headers":     "*",
+            "Vary":                             "Origin",
+        }
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=cors_headers,
+    )
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "app": settings.APP_NAME}
