@@ -60,8 +60,8 @@ def _maybe_stamp_baseline(connection):
 
     # FINAL_MIGRATION: once this revision is recorded, this function is a no-op forever.
     # Update this to the latest migration revision whenever a new "fix chain" is added.
-    FINAL_MIGRATION = '053'
-    STAMP_AT        = '052'  # one step before FINAL_MIGRATION
+    FINAL_MIGRATION = '054'
+    STAMP_AT        = '053'  # one step before FINAL_MIGRATION
 
     has_version_table = connection.execute(text(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
