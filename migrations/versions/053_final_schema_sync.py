@@ -77,26 +77,38 @@ def upgrade():
     op.execute(text("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS due_collect_at   TIMESTAMP WITH TIME ZONE"))
     op.execute(text("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP WITH TIME ZONE"))
 
-    # Make quotation_service_items.service_id nullable (custom services have no FK).
-    # Use op.get_bind() ONLY for SELECT queries (read-only) — DDL goes through op.execute().
-    bind = op.get_bind()
-    row = bind.execute(text(
-        "SELECT is_nullable FROM information_schema.columns "
-        "WHERE table_name='quotation_service_items' AND column_name='service_id'"
-    )).fetchone()
-    if row and row[0] == 'NO':
-        op.execute(text("ALTER TABLE quotation_service_items ALTER COLUMN service_id DROP NOT NULL"))
+    # Make quotation_service_items.service_id nullable — using DO $$ to avoid
+    # op.get_bind() which crashes under asyncpg run_sync bridge.
+    op.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name  = 'quotation_service_items'
+                  AND column_name = 'service_id'
+                  AND is_nullable = 'NO'
+            ) THEN
+                ALTER TABLE quotation_service_items
+                    ALTER COLUMN service_id DROP NOT NULL;
+            END IF;
+        END
+        $$;
+    """))
 
-    # Unique constraint on users.firebase_uid (idempotent)
-    exists = bind.execute(text(
-        "SELECT 1 FROM information_schema.table_constraints "
-        "WHERE constraint_name='uq_users_firebase_uid'"
-    )).fetchone()
-    if not exists:
-        try:
-            op.execute(text("ALTER TABLE users ADD CONSTRAINT uq_users_firebase_uid UNIQUE (firebase_uid)"))
-        except Exception:
-            pass
+    # Unique constraint on users.firebase_uid (idempotent via DO $$)
+    op.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'uq_users_firebase_uid'
+            ) THEN
+                ALTER TABLE users
+                    ADD CONSTRAINT uq_users_firebase_uid UNIQUE (firebase_uid);
+            END IF;
+        END
+        $$;
+    """))
 
     print("[053] Final schema sync complete — all missing columns added via op.execute().")
 

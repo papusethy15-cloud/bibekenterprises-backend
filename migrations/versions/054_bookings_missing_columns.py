@@ -11,14 +11,12 @@ ROOT CAUSE of /bookings 500 on VPS (but not local):
     bookings.coupon_discount FLOAT  (nullable, default 0.0)
     bookings.city_id         UUID   FK → cities.id (nullable)
 
-  All statements use ADD COLUMN IF NOT EXISTS — safe no-op on any DB that
-  already has the columns (local dev, any VPS that ran create_all).
+  All statements use IF NOT EXISTS / DO $$ guards — safe no-op on any DB
+  that already has the columns.
 
-  env.py: FINAL_MIGRATION → '054', STAMP_AT → '053'
-
-DO NOT manually stamp this on VPS. Push the code and let pm2 restart
-trigger _auto_migrate() → env.py resets alembic_version to '053' →
-alembic upgrade head runs this migration.
+  IMPORTANT: do NOT use op.get_bind() in this migration — it is incompatible
+  with asyncpg's run_sync bridge and causes "Aborted!" mid-migration.
+  All logic (including conditional checks) uses op.execute(text(...)) only.
 
 Revision ID: 054
 Revises: 053
@@ -35,9 +33,6 @@ depends_on = None
 
 def upgrade():
     # ── bookings: coupon fields ───────────────────────────────────────────────
-    # These were added to the ORM model (Booking class in models/booking.py)
-    # but never appeared in any migration, causing a 500 on the VPS bookings
-    # list endpoint because SQLAlchemy tries to read them from the result set.
     op.execute(text(
         "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_id       UUID"
     ))
@@ -45,35 +40,36 @@ def upgrade():
         "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code     VARCHAR(50)"
     ))
     op.execute(text(
-        "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount  FLOAT DEFAULT 0.0"
+        "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount FLOAT DEFAULT 0.0"
     ))
 
-    # ── bookings: city_id FK → cities ────────────────────────────────────────
-    # Also in the ORM model but never migrated.
-    # Add without FK constraint first (cities table may or may not exist on VPS).
+    # ── bookings: city_id ─────────────────────────────────────────────────────
     op.execute(text(
         "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS city_id UUID"
     ))
 
-    # Add FK constraint only if cities table exists and constraint not already there
-    bind = op.get_bind()
-    cities_exists = bind.execute(text(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-        "WHERE table_name = 'cities')"
-    )).scalar()
-    fk_exists = bind.execute(text(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.table_constraints "
-        "WHERE constraint_name = 'fk_bookings_city_id' "
-        "AND table_name = 'bookings')"
-    )).scalar()
-    if cities_exists and not fk_exists:
-        try:
-            op.execute(text(
-                "ALTER TABLE bookings ADD CONSTRAINT fk_bookings_city_id "
-                "FOREIGN KEY (city_id) REFERENCES cities(id)"
-            ))
-        except Exception:
-            pass  # FK already exists under a different name — safe to skip
+    # Add FK constraint using a DO $$ block — avoids op.get_bind() entirely.
+    # The DO block runs entirely inside PostgreSQL so it can check & add atomically.
+    op.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'cities'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'fk_bookings_city_id'
+                  AND table_name = 'bookings'
+            )
+            THEN
+                ALTER TABLE bookings
+                    ADD CONSTRAINT fk_bookings_city_id
+                    FOREIGN KEY (city_id) REFERENCES cities(id);
+            END IF;
+        END
+        $$;
+    """))
 
     print("[054] bookings missing columns added: coupon_id, coupon_code, coupon_discount, city_id")
 
