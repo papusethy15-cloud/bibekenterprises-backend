@@ -581,22 +581,44 @@ async def _safe_db_patches():
     Called on every startup — runs in < 100ms normally.
 
     Current patches:
-      P1: Add CANCELLED to paymentstatus enum (needed by payments.py to void
-          stale PAY_LATER transactions when a real CASH payment is collected).
-          Without this the entire /payments/cash endpoint fails with:
-            ERROR: invalid input value for enum paymentstatus: "CANCELLED"
+      P1: Add CANCELLED to paymentstatus enum.
+      P2: Add all missing bookingstatus enum values — covers VPS where migrations
+          021/035 may have run inside a transaction and silently no-op'd due to
+          PostgreSQL's restriction that ALTER TYPE ADD VALUE cannot run in a
+          transaction. This patch runs OUTSIDE a transaction (COMMIT trick) so
+          it always succeeds regardless of migration history.
     """
     try:
         from sqlalchemy import text
         from app.core.database import engine
         async with engine.connect() as conn:
+            # Must exit any implicit transaction before ADD VALUE calls
+            await conn.execute(text("COMMIT"))
+
             # P1 — paymentstatus CANCELLED
-            # Must run outside a transaction (Postgres restriction for ADD VALUE).
-            await conn.execute(text("COMMIT"))  # end any open transaction
             await conn.execute(text(
                 "ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'CANCELLED'"
             ))
             print("[OK] safe_db_patches: paymentstatus.CANCELLED ensured")
+
+            # P2 — bookingstatus: all values that may be missing on VPS
+            # ALTER TYPE ADD VALUE cannot run in a transaction in PostgreSQL,
+            # so migrations that added these inside begin_transaction() silently
+            # failed. We guarantee them here outside any transaction.
+            _booking_status_values = [
+                "PENDING_VERIFICATION", "TECHNICIAN_ACCEPTED", "INVOICE_GENERATED",
+                "PAYMENT_PENDING", "WORK_STARTED", "WORK_PAUSED", "REFUND_INITIATED",
+                "PAID", "CLOSED", "SETTLED", "QUOTATION_APPROVED",
+                "CANCELLATION_REQUESTED",
+            ]
+            for _val in _booking_status_values:
+                try:
+                    await conn.execute(text(
+                        f"ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS '{_val}'"
+                    ))
+                except Exception as _ev:
+                    pass  # already exists or other harmless error
+            print("[OK] safe_db_patches: bookingstatus enum values ensured")
     except Exception as e:
         print(f"[WARN] safe_db_patches: {e}")
 
