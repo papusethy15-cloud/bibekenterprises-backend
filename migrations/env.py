@@ -29,32 +29,21 @@ def run_migrations_offline():
 
 async def _stamp_baseline_async():
     """
-    SEPARATE async function that runs BEFORE Alembic's run_sync bridge.
-
-    Uses its own engine + connection + explicit commit so the alembic_version
-    UPDATE is fully persisted to PostgreSQL before Alembic opens its own
-    connection and calls upgrade(). This is the only reliable way to pre-set
-    alembic_version: any write done inside run_sync(do_run_migrations) shares
-    a transaction with Alembic's own version-stamp writes, causing one or the
-    other to be lost depending on transaction nesting order.
-
-    FINAL_MIGRATION: the revision we want to reach after this startup.
-    STAMP_AT:        one step before — we reset alembic_version here so
-                     Alembic runs exactly FINAL_MIGRATION on upgrade head.
+    Runs BEFORE Alembic's run_sync bridge in its own committed transaction.
+    Resets alembic_version to STAMP_AT so Alembic will run FINAL_MIGRATION.
+    If FINAL_MIGRATION is already applied, this is a permanent no-op.
     """
-    FINAL_MIGRATION = "054"
-    STAMP_AT        = "053"
+    FINAL_MIGRATION = "055"
+    STAMP_AT        = "054"
 
     engine = create_async_engine(_DB_URL, poolclass=pool.NullPool)
     try:
-        async with engine.begin() as conn:   # begin() auto-commits on exit
-            # Check alembic_version table exists
+        async with engine.begin() as conn:
             has_table = (await conn.execute(text(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = 'alembic_version')"
             ))).scalar()
 
-            # Check real schema exists (not a blank DB)
             has_users = (await conn.execute(text(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = 'users')"
@@ -90,7 +79,7 @@ async def _stamp_baseline_async():
             await conn.execute(
                 text(f"INSERT INTO alembic_version (version_num) VALUES ('{STAMP_AT}')")
             )
-            # engine.begin() commits here automatically on __aexit__
+            # engine.begin() auto-commits on __aexit__
 
         print(
             f"[INFO] env.py: alembic_version committed to {STAMP_AT} "
@@ -100,7 +89,36 @@ async def _stamp_baseline_async():
         await engine.dispose()
 
 
+async def _force_stamp_final_async(final: str):
+    """
+    Runs AFTER Alembic's run_sync bridge in its own committed transaction.
+    Forces alembic_version to FINAL_MIGRATION if Alembic's own stamp didn't persist.
+    This guards against the asyncpg run_sync transaction not committing the version update.
+    """
+    engine = create_async_engine(_DB_URL, poolclass=pool.NullPool)
+    try:
+        async with engine.begin() as conn:
+            rows = (await conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            )).fetchall()
+            current = {r[0] for r in rows}
+
+            if final in current:
+                return  # already stamped correctly
+
+            print(f"[INFO] env.py: post-migration stamp fix — forcing {final} (was {current})")
+            await conn.execute(text("DELETE FROM alembic_version"))
+            await conn.execute(
+                text(f"INSERT INTO alembic_version (version_num) VALUES ('{final}')")
+            )
+        print(f"[INFO] env.py: alembic_version force-stamped to {final}")
+    finally:
+        await engine.dispose()
+
+
 async def run_async_migrations():
+    FINAL_MIGRATION = "055"
+
     # Step 1: pre-stamp alembic_version in its own committed transaction
     await _stamp_baseline_async()
 
@@ -109,6 +127,9 @@ async def run_async_migrations():
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()
+
+    # Step 3: guarantee alembic_version is stamped even if run_sync didn't commit it
+    await _force_stamp_final_async(FINAL_MIGRATION)
 
 
 def do_run_migrations(connection):
