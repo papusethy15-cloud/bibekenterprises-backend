@@ -576,55 +576,70 @@ async def _pay_later_reminder_sweep():
 
 async def _safe_db_patches():
     """
-    Idempotent DB patches that must be applied even if Alembic is out of sync.
-    Each patch is safe to run multiple times (IF NOT EXISTS guards).
-    Called on every startup — runs in < 100ms normally.
+    Idempotent DB patches applied on every startup, bypassing Alembic entirely.
+    Uses a raw asyncpg connection in AUTOCOMMIT mode so DDL commits immediately —
+    no transaction wrapping, no Alembic version checks.
 
-    Current patches:
-      P1: Add CANCELLED to paymentstatus enum.
-      P2: Add all missing bookingstatus enum values — covers VPS where migrations
-          021/035 may have run inside a transaction and silently no-op'd due to
-          PostgreSQL's restriction that ALTER TYPE ADD VALUE cannot run in a
-          transaction. This patch runs OUTSIDE a transaction (COMMIT trick) so
-          it always succeeds regardless of migration history.
+    Patches:
+      P1: paymentstatus enum — add CANCELLED
+      P2: bookingstatus enum — add all values missing on VPS
+      P3: bookings table — add coupon/city columns missing on VPS
+          (belt-and-suspenders: even if migration 054/055 aborted, these land here)
     """
-    # ALTER TYPE ADD VALUE cannot run inside a transaction in PostgreSQL.
-    # Use AUTOCOMMIT isolation level so every statement commits immediately —
-    # no implicit transaction is ever opened.
-    try:
-        from sqlalchemy import text
-        from app.core.database import engine
-        async with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            # P1 — paymentstatus CANCELLED
-            try:
-                await conn.execute(text(
-                    "ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'CANCELLED'"
-                ))
-                print("[OK] safe_db_patches: paymentstatus.CANCELLED ensured")
-            except Exception as _e1:
-                print(f"[WARN] safe_db_patches P1: {_e1}")
+    import asyncpg
+    from app.core.config import settings as _s
 
-            # P2 — bookingstatus: guarantee ALL enum values exist on VPS.
-            # Migrations 005/021/035 that used ALTER TYPE ADD VALUE inside
-            # Alembic begin_transaction() failed silently on PostgreSQL (ADD VALUE
-            # is non-transactional). AUTOCOMMIT here ensures each ADD VALUE
-            # commits immediately and never raises a transaction conflict.
-            _booking_status_values = [
+    # Build a plain asyncpg DSN from the SQLAlchemy URL
+    _dsn = (
+        _s.DATABASE_URL
+        .replace("postgresql+asyncpg://", "postgresql://")
+        .replace("postgresql://", "postgresql://")
+    )
+
+    try:
+        conn = await asyncpg.connect(_dsn)
+        try:
+            # ── P1: paymentstatus enum ────────────────────────────────────────
+            for _v in ["CANCELLED"]:
+                try:
+                    await conn.execute(
+                        f"ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS '{_v}'"
+                    )
+                except Exception:
+                    pass
+            print("[OK] safe_db_patches: paymentstatus.CANCELLED ensured")
+
+            # ── P2: bookingstatus enum ────────────────────────────────────────
+            for _v in [
                 "PENDING_VERIFICATION", "TECHNICIAN_ACCEPTED", "INVOICE_GENERATED",
                 "PAYMENT_PENDING", "WORK_STARTED", "WORK_PAUSED", "REFUND_INITIATED",
                 "PAID", "CLOSED", "SETTLED", "QUOTATION_APPROVED",
                 "CANCELLATION_REQUESTED",
-            ]
-            _added = []
-            for _val in _booking_status_values:
+            ]:
                 try:
-                    await conn.execute(text(
-                        f"ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS '{_val}'"
-                    ))
-                    _added.append(_val)
-                except Exception as _ev:
-                    pass  # value already exists — fine
-            print(f"[OK] safe_db_patches: bookingstatus enum ensured ({len(_added)} values added/verified)")
+                    await conn.execute(
+                        f"ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS '{_v}'"
+                    )
+                except Exception:
+                    pass
+            print("[OK] safe_db_patches: bookingstatus enum values ensured")
+
+            # ── P3: bookings table — columns that VPS migrations may have missed ─
+            _col_ddl = [
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_id       UUID",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code     VARCHAR(50)",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount FLOAT DEFAULT 0.0",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS city_id         UUID",
+            ]
+            for _ddl in _col_ddl:
+                try:
+                    await conn.execute(_ddl)
+                except Exception:
+                    pass
+            print("[OK] safe_db_patches: bookings columns ensured")
+
+        finally:
+            await conn.close()
     except Exception as e:
         print(f"[WARN] safe_db_patches: {e}")
 
