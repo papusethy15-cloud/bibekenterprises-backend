@@ -576,70 +576,54 @@ async def _pay_later_reminder_sweep():
 
 async def _safe_db_patches():
     """
-    Idempotent DB patches applied on every startup, bypassing Alembic entirely.
-    Uses a raw asyncpg connection in AUTOCOMMIT mode so DDL commits immediately —
-    no transaction wrapping, no Alembic version checks.
+    Idempotent DB patches on every startup — runs raw SQL via psycopg2 in
+    autocommit mode so ALTER TYPE ADD VALUE works (PostgreSQL restriction:
+    ADD VALUE cannot run inside a transaction).
 
     Patches:
-      P1: paymentstatus enum — add CANCELLED
-      P2: bookingstatus enum — add all values missing on VPS
-      P3: bookings table — add coupon/city columns missing on VPS
-          (belt-and-suspenders: even if migration 054/055 aborted, these land here)
+      P1: paymentstatus.CANCELLED
+      P2: all bookingstatus enum values that VPS migrations missed
+      P3: bookings columns (coupon_id, coupon_code, coupon_discount, city_id)
     """
-    import asyncpg
+    import subprocess, sys, os
     from app.core.config import settings as _s
 
-    # Build a plain asyncpg DSN from the SQLAlchemy URL
-    _dsn = (
-        _s.DATABASE_URL
-        .replace("postgresql+asyncpg://", "postgresql://")
-        .replace("postgresql://", "postgresql://")
-    )
+    # Build the psql command — use the DATABASE_URL directly.
+    # Strip +asyncpg driver qualifier if present.
+    _url = _s.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+
+    _sql = """
+ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'CANCELLED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'PENDING_VERIFICATION';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'TECHNICIAN_ACCEPTED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'INVOICE_GENERATED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'PAYMENT_PENDING';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'WORK_STARTED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'WORK_PAUSED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'REFUND_INITIATED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'PAID';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'CLOSED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'SETTLED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'QUOTATION_APPROVED';
+ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS 'CANCELLATION_REQUESTED';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_id       UUID;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code     VARCHAR(50);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount FLOAT DEFAULT 0.0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS city_id         UUID;
+"""
 
     try:
-        conn = await asyncpg.connect(_dsn)
-        try:
-            # ── P1: paymentstatus enum ────────────────────────────────────────
-            for _v in ["CANCELLED"]:
-                try:
-                    await conn.execute(
-                        f"ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS '{_v}'"
-                    )
-                except Exception:
-                    pass
-            print("[OK] safe_db_patches: paymentstatus.CANCELLED ensured")
-
-            # ── P2: bookingstatus enum ────────────────────────────────────────
-            for _v in [
-                "PENDING_VERIFICATION", "TECHNICIAN_ACCEPTED", "INVOICE_GENERATED",
-                "PAYMENT_PENDING", "WORK_STARTED", "WORK_PAUSED", "REFUND_INITIATED",
-                "PAID", "CLOSED", "SETTLED", "QUOTATION_APPROVED",
-                "CANCELLATION_REQUESTED",
-            ]:
-                try:
-                    await conn.execute(
-                        f"ALTER TYPE bookingstatus ADD VALUE IF NOT EXISTS '{_v}'"
-                    )
-                except Exception:
-                    pass
-            print("[OK] safe_db_patches: bookingstatus enum values ensured")
-
-            # ── P3: bookings table — columns that VPS migrations may have missed ─
-            _col_ddl = [
-                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_id       UUID",
-                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code     VARCHAR(50)",
-                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount FLOAT DEFAULT 0.0",
-                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS city_id         UUID",
-            ]
-            for _ddl in _col_ddl:
-                try:
-                    await conn.execute(_ddl)
-                except Exception:
-                    pass
-            print("[OK] safe_db_patches: bookings columns ensured")
-
-        finally:
-            await conn.close()
+        result = subprocess.run(
+            ["psql", _url, "-c", _sql],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print("[OK] safe_db_patches: enum values and bookings columns ensured")
+        else:
+            # psql not available or connection failed — log and continue
+            print(f"[WARN] safe_db_patches psql: {result.stderr.strip()[:200]}")
+    except FileNotFoundError:
+        print("[WARN] safe_db_patches: psql not found, skipping direct patches")
     except Exception as e:
         print(f"[WARN] safe_db_patches: {e}")
 
