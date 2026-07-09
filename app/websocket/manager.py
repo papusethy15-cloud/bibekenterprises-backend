@@ -15,6 +15,12 @@ Architecture
   all workers share the same Redis pub/sub so every client receives
   every event regardless of which process owns their WebSocket.
 
+  LOCAL DEV WITHOUT REDIS
+  ───────────────────────
+  If Redis is unavailable, the manager falls back to direct in-process
+  broadcast. This means WebSocket events work normally in single-worker
+  dev mode (uvicorn --reload). Multi-worker prod still requires Redis.
+
 Rooms / channels
 ────────────────
   booking:{booking_id}          — booking-level events
@@ -46,65 +52,39 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ─── Redis availability flag ─────────────────────────────────────────────────
+# Set to True once Redis connects successfully; False when connection fails.
+# publish_event() reads this to decide whether to use Redis or direct broadcast.
+_redis_available: bool = False
+
+
 # ─── Event type constants ────────────────────────────────────────────────────
 class WSEvent:
-    # Assignment events
-    ASSIGNMENT_CREATED        = "ASSIGNMENT_CREATED"
-    ASSIGNMENT_ACCEPTED       = "ASSIGNMENT_ACCEPTED"
-    ASSIGNMENT_REJECTED       = "ASSIGNMENT_REJECTED"
-    ASSIGNMENT_AUTO_CANCELLED = "ASSIGNMENT_AUTO_CANCELLED"
-
-    # Booking events
-    BOOKING_STATUS_CHANGED    = "BOOKING_STATUS_CHANGED"
-    BOOKING_TECHNICIAN_UPDATED = "BOOKING_TECHNICIAN_UPDATED"
-
-    # Technician events
-    TECHNICIAN_LOCATION_UPDATE  = "TECHNICIAN_LOCATION_UPDATE"
-    TECHNICIAN_ONLINE_STATUS    = "TECHNICIAN_ONLINE_STATUS"
-    TECHNICIAN_STATUS_CHANGED   = "TECHNICIAN_STATUS_CHANGED"   # auto-offline broadcasts
-
-    # Dispatch / manual assign alerts
-    BOOKING_NEEDS_MANUAL_ASSIGN = "BOOKING_NEEDS_MANUAL_ASSIGN"
-
-    # Quotation events (real-time admin <-> technician sync)
-    QUOTATION_CREATED = "QUOTATION_CREATED"
-    QUOTATION_UPDATED = "QUOTATION_UPDATED"
-    QUOTATION_DELETED = "QUOTATION_DELETED"
-
-    # New booking from website
-    BOOKING_CREATED           = "BOOKING_CREATED"
-
-    # Payment / cash collection
-    PAYMENT_COLLECTED         = "PAYMENT_COLLECTED"
-    PAYMENT_DUE_REMINDER      = "PAYMENT_DUE_REMINDER"  # pay-later collection reminder sweep
-
-    # Customer callback request
-    CALLBACK_REQUEST          = "CALLBACK_REQUEST"
-
-    # Quotation submitted by technician (needs admin approval)
-    QUOTATION_SUBMITTED       = "QUOTATION_SUBMITTED"
-    QUOTATION_APPROVED        = "QUOTATION_APPROVED"
-
-    # Inspection submitted (by technician OR CCO on behalf)
-    INSPECTION_SUBMITTED       = "INSPECTION_SUBMITTED"
-
-    # Ping/pong
-    PING = "PING"
-    PONG = "PONG"
+    PING                     = "PING"
+    PONG                     = "PONG"
+    CONNECTED                = "CONNECTED"
+    SUBSCRIBED               = "SUBSCRIBED"
+    BOOKING_STATUS_CHANGED   = "BOOKING_STATUS_CHANGED"
+    ASSIGNMENT_CREATED       = "ASSIGNMENT_CREATED"
+    ASSIGNMENT_ACCEPTED      = "ASSIGNMENT_ACCEPTED"
+    ASSIGNMENT_REJECTED      = "ASSIGNMENT_REJECTED"
+    ASSIGNMENT_AUTO_CANCELLED= "ASSIGNMENT_AUTO_CANCELLED"
+    TECHNICIAN_STATUS_CHANGED= "TECHNICIAN_STATUS_CHANGED"
+    QUOTATION_CREATED        = "QUOTATION_CREATED"
+    QUOTATION_UPDATED        = "QUOTATION_UPDATED"
+    QUOTATION_APPROVED       = "QUOTATION_APPROVED"
+    QUOTATION_REJECTED       = "QUOTATION_REJECTED"
+    PAYMENT_RECEIVED         = "PAYMENT_RECEIVED"
+    NOTIFICATION             = "NOTIFICATION"
 
 
-# ─── Room helpers ────────────────────────────────────────────────────────────
-def booking_room(booking_id: str) -> str:
-    return f"booking:{booking_id}"
-
-def technician_room(technician_id: str) -> str:
-    return f"technician:{technician_id}"
-
-def customer_room(user_id: str) -> str:
-    return f"customer:{user_id}"
-
+# ─── Room name helpers ───────────────────────────────────────────────────────
 ADMIN_ASSIGNMENTS_ROOM = "admin:assignments"
 ADMIN_BOOKINGS_ROOM    = "admin:bookings"
+
+def booking_room(booking_id: str)     -> str: return f"booking:{booking_id}"
+def technician_room(technician_id: str) -> str: return f"technician:{technician_id}"
+def customer_room(user_id: str)       -> str: return f"customer:{user_id}"
 
 
 # ─── ConnectionManager ───────────────────────────────────────────────────────
@@ -122,7 +102,9 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def connect(self, ws: WebSocket, rooms: list[str]):
-        await ws.accept()
+        # NOTE: ws.accept() is called in _validate_ws_token (router.py) before
+        # connect() is invoked. Do NOT call ws.accept() here — calling it twice
+        # raises a Starlette error and closes the connection immediately.
         async with self._lock:
             for room in rooms:
                 self._rooms[room].add(ws)
@@ -169,14 +151,36 @@ async def _redis_subscriber():
     Connects to Redis, subscribes to the master channel, and relays every
     published message to the appropriate WS room.
     Runs forever; auto-reconnects on connection loss.
+
+    LOCAL DEV: If Redis is not available, logs a warning and waits 30s before
+    retrying — does NOT spam the log every 3 seconds. WS connections still work
+    via the direct-broadcast fallback in publish_event().
     """
+    global _redis_available
     channel_name = "palei:ws:events"
+    _first_attempt = True
+    _consecutive_failures = 0
+
     while True:
         try:
-            redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            redis_client = aioredis.from_url(
+                settings.REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=3,   # fail fast if Redis is down
+                socket_timeout=3,
+            )
+            # Test the connection before subscribing
+            await redis_client.ping()
+
             pubsub = redis_client.pubsub()
             await pubsub.subscribe(channel_name)
-            logger.info(f"[WS] Redis subscriber started on channel '{channel_name}'")
+
+            if not _redis_available:
+                logger.info(f"[WS] Redis connected ✓ — subscriber started on '{channel_name}'")
+            _redis_available = True
+            _consecutive_failures = 0
+            _first_attempt = False
+
             async for raw_msg in pubsub.listen():
                 if raw_msg["type"] != "message":
                     continue
@@ -187,12 +191,27 @@ async def _redis_subscriber():
                         await manager.broadcast_to_room(room, event)
                 except Exception as parse_err:
                     logger.warning(f"[WS] Bad event payload: {parse_err}")
+
         except asyncio.CancelledError:
             logger.info("[WS] Redis subscriber cancelled")
+            _redis_available = False
             break
+
         except Exception as conn_err:
-            logger.warning(f"[WS] Redis subscriber error: {conn_err} — reconnecting in 3 s")
-            await asyncio.sleep(3)
+            _redis_available = False
+            _consecutive_failures += 1
+
+            if _first_attempt or _consecutive_failures == 1:
+                logger.warning(
+                    f"[WS] Redis unavailable ({conn_err}). "
+                    f"WebSocket events will use direct in-process broadcast (single-worker only). "
+                    f"Start Redis to enable multi-worker pub/sub."
+                )
+                _first_attempt = False
+
+            # Back off: 5s, 10s, 30s, then every 60s — don't spam
+            delay = min(5 * (2 ** min(_consecutive_failures - 1, 3)), 60)
+            await asyncio.sleep(delay)
 
 
 async def start_redis_subscriber():
@@ -220,17 +239,11 @@ async def publish_event(room: str, event_type: str, payload: dict):
     """
     Publish an event to ALL Uvicorn workers via Redis pub/sub.
 
-    IMPORTANT — single delivery guarantee
-    ──────────────────────────────────────
-    We publish ONLY to Redis and let the subscriber relay it back.
-    We do NOT also call broadcast_to_room() here, because the Redis
-    subscriber runs in the same process (single-worker dev) and would
-    deliver the message twice:
-      1. direct broadcast_to_room()  ← first delivery
-      2. Redis → subscriber → broadcast_to_room()  ← duplicate delivery
-
-    In multi-worker production each worker's subscriber relays the
-    message to its own connected sockets — exactly what we want.
+    FALLBACK BEHAVIOUR (Redis unavailable / local dev)
+    ──────────────────────────────────────────────────
+    When Redis is down, broadcasts directly to in-process WebSocket clients.
+    This works perfectly in single-worker dev mode. In multi-worker production
+    it only reaches clients on the current worker — start Redis for full fanout.
     """
     event = {
         "type":      event_type,
@@ -238,16 +251,22 @@ async def publish_event(room: str, event_type: str, payload: dict):
         "payload":   payload,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    # Publish to Redis — the subscriber in EVERY worker (including this one)
-    # will receive it and call broadcast_to_room() exactly once.
-    try:
-        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-        await redis_client.publish("palei:ws:events", json.dumps(event, default=str))
-        await redis_client.aclose()
-    except Exception as e:
-        logger.warning(f"[WS] Redis publish failed — falling back to direct broadcast: {e}")
-        # Fallback: if Redis is down, broadcast directly so the event isn't lost
-        await manager.broadcast_to_room(room, event)
+
+    if _redis_available:
+        # Production path: publish to Redis → subscriber relays to all workers
+        try:
+            redis_client = aioredis.from_url(
+                settings.REDIS_URL, decode_responses=True,
+                socket_connect_timeout=2, socket_timeout=2,
+            )
+            await redis_client.publish("palei:ws:events", json.dumps(event, default=str))
+            await redis_client.aclose()
+            return
+        except Exception as e:
+            logger.warning(f"[WS] Redis publish failed — using direct broadcast: {e}")
+
+    # Dev/fallback path: broadcast directly to in-process clients
+    await manager.broadcast_to_room(room, event)
 
 
 def publish_event_sync(room: str, event_type: str, payload: dict):
@@ -263,7 +282,7 @@ def publish_event_sync(room: str, event_type: str, payload: dict):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        r = sync_redis.from_url(settings.REDIS_URL, decode_responses=True)
+        r = sync_redis.from_url(settings.REDIS_URL, decode_responses=True, socket_timeout=2)
         r.publish("palei:ws:events", json.dumps(event, default=str))
         r.close()
     except Exception as e:

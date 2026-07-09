@@ -20,7 +20,12 @@ Auth
 ────
   WebSocket connections cannot send HTTP headers after the handshake,
   so the JWT is passed as ?token= query parameter.
-  The endpoint validates it and closes the connection with 4001 on failure.
+
+  IMPORTANT: ws.accept() MUST be called before ws.close() — the HTTP→WS
+  upgrade handshake must complete before the server can send a WS close frame.
+  Without accept(), Starlette drops the TCP connection immediately, which
+  Firefox reports as NS_ERROR_WEBSOCKET_CONNECTION_REFUSED instead of a
+  clean close event.
 
 Client protocol (JSON text frames)
 ───────────────────────────────────
@@ -59,7 +64,15 @@ logger = logging.getLogger(__name__)
 
 # ─── token validation helper ─────────────────────────────────────────────────
 async def _validate_ws_token(ws: WebSocket, token: str | None) -> dict | None:
-    """Validates JWT from query param. Closes connection and returns None on failure."""
+    """
+    Validates JWT from query param.
+    MUST call ws.accept() before ws.close() — otherwise Starlette drops
+    the TCP connection without completing the WebSocket handshake, which
+    causes Firefox to report NS_ERROR_WEBSOCKET_CONNECTION_REFUSED instead
+    of a clean close that the client can handle gracefully.
+    """
+    await ws.accept()  # ← complete the HTTP→WS upgrade FIRST
+
     if not token:
         await ws.close(code=4001, reason="Missing token")
         return None

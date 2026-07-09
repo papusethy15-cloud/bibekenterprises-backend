@@ -179,7 +179,8 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     return success_response(data={
         "access_token": access_token, "refresh_token": refresh_token,
         "token_type": "bearer", "user_id": str(user.id),
-        "role": user.role.value, "name": user.name
+        "role": user.role.value, "name": user.name,
+        "mpin_set": user.mpin_hash is not None,
     }, message="Login successful")
 
 @router.post("/refresh-token", summary="Get new access token using refresh token")
@@ -385,3 +386,61 @@ async def update_me(
     if payload.city:  user.city  = payload.city
     await db.commit()
     return success_response(message="Profile updated successfully")
+
+
+# ── Per-user MPIN endpoints ────────────────────────────────────────────────────
+# Each CCO/Admin has their own MPIN stored as SHA-256 hash in users.mpin_hash.
+# This survives logout — the hash is set once and stays in the DB.
+# On login the frontend fetches /auth/mpin/status to know if MPIN already exists.
+
+class MpinSetupRequest(PydanticBaseModel):
+    mpin_hash: str   # SHA-256 hex string, hashed client-side
+
+class MpinVerifyRequest(PydanticBaseModel):
+    mpin_hash: str   # SHA-256 hex string, hashed client-side
+
+@router.get("/mpin/status", summary="Check if MPIN is set for current user")
+async def mpin_status(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from uuid import UUID
+    result = await db.execute(select(User).where(User.id == UUID(current_user["user_id"])))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return success_response(data={"mpin_set": user.mpin_hash is not None})
+
+@router.post("/mpin/setup", summary="Set or update MPIN for current user")
+async def mpin_setup(
+    payload: MpinSetupRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from uuid import UUID
+    if not payload.mpin_hash or len(payload.mpin_hash) != 64:
+        raise HTTPException(status_code=400, detail="mpin_hash must be a 64-char SHA-256 hex string")
+    result = await db.execute(select(User).where(User.id == UUID(current_user["user_id"])))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.mpin_hash = payload.mpin_hash
+    await db.commit()
+    return success_response(message="MPIN saved successfully")
+
+@router.post("/mpin/verify", summary="Verify MPIN for current user (unlock screen)")
+async def mpin_verify(
+    payload: MpinVerifyRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from uuid import UUID
+    if not payload.mpin_hash or len(payload.mpin_hash) != 64:
+        raise HTTPException(status_code=400, detail="Invalid mpin_hash")
+    result = await db.execute(select(User).where(User.id == UUID(current_user["user_id"])))
+    user = result.scalar_one_or_none()
+    if not user or not user.mpin_hash:
+        raise HTTPException(status_code=400, detail="MPIN not set for this user")
+    if user.mpin_hash != payload.mpin_hash:
+        raise HTTPException(status_code=401, detail="Incorrect MPIN")
+    return success_response(data={"verified": True})

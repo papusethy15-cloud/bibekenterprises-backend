@@ -28,3 +28,4 @@ class User(BaseModel):
     is_verified   = Column(Boolean, default=False)
     fcm_token     = Column(String(500), nullable=True)   # Admin/CCO push notification token
     firebase_uid  = Column(String(128), unique=True, nullable=True)  # Links account to Firebase Auth (Google sign-in)
+    mpin_hash     = Column(String(255), nullable=True)  # SHA-256 hash of CCO/Admin MPIN for screen lock

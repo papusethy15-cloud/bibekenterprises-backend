@@ -552,7 +552,7 @@ async def generate_payment_qr(
 @router.get("/history", summary="Transaction history")
 async def payment_history(
     page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
+    per_page: int = Query(20, ge=1, le=500),
     invoice_id: str = Query(None),
     booking_id: str = Query(None),
     method: str = Query(None),
