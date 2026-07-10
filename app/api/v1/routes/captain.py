@@ -30,6 +30,7 @@ from app.models.technician import Technician
 from app.models.user import User
 from app.models.booking import Booking, BookingStatus
 from app.models.tracking import TrackingLocation
+import traceback
 from app.utils.response import success_response
 
 router = APIRouter()
@@ -262,107 +263,122 @@ async def captain_my_jobs(
     from app.models.customer import Customer, CustomerAddress
     tech = await _get_technician_for_user(current_user["user_id"], db)
 
-    # 30-day lookback window for completed/closed jobs
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    try:
+        # 30-day lookback window for completed/closed jobs
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
-    # Fetch the most-recent AssignmentHistory row per booking for this tech
-    # using a subquery alias so we can order by it.
-    latest_assign = (
-        select(
-            AssignmentHistory.booking_id,
-            func.max(AssignmentHistory.created_at).label("assigned_at"),
+        # Fetch the most-recent AssignmentHistory row per booking for this tech
+        # using a subquery alias so we can order by it.
+        latest_assign = (
+            select(
+                AssignmentHistory.booking_id,
+                func.max(AssignmentHistory.created_at).label("assigned_at"),
+            )
+            .where(AssignmentHistory.technician_id == tech.id)
+            .group_by(AssignmentHistory.booking_id)
+            .subquery("latest_assign")
         )
-        .where(AssignmentHistory.technician_id == tech.id)
-        .group_by(AssignmentHistory.booking_id)
-        .subquery("latest_assign")
-    )
 
-    result = await db.execute(
-        select(
-            Booking,
-            Customer,
-            CustomerAddress,
-            AssignmentHistory,
-            latest_assign.c.assigned_at,
+        result = await db.execute(
+            select(
+                Booking,
+                Customer,
+                CustomerAddress,
+                AssignmentHistory,
+                latest_assign.c.assigned_at,
+            )
+            .outerjoin(Customer, Booking.customer_id == Customer.id)
+            .outerjoin(CustomerAddress, Booking.address_id == CustomerAddress.id)
+            .outerjoin(
+                latest_assign,
+                latest_assign.c.booking_id == Booking.id,
+            )
+            .outerjoin(
+                AssignmentHistory,
+                (AssignmentHistory.booking_id == Booking.id)
+                & (AssignmentHistory.technician_id == tech.id)
+                & (AssignmentHistory.created_at == latest_assign.c.assigned_at),
+            )
+            .where(
+                Booking.technician_id == tech.id,
+                # Exclude ASSIGNED (pending acceptance — shown in incoming screen, not jobs list)
+                # Exclude CANCELLED
+                Booking.status.notin_(["CANCELLED", "ASSIGNED"]),
+                # Active jobs: always included
+                # Completed/closed/paid: only within 30-day window
+                (
+                    Booking.status.notin_(["COMPLETED", "PAID", "CLOSED", "SETTLED"])
+                    | (Booking.updated_at >= cutoff)
+                ),
+            )
+            .order_by(latest_assign.c.assigned_at.desc().nullslast(), Booking.created_at.desc())
+            .limit(100)
         )
-        .outerjoin(Customer, Booking.customer_id == Customer.id)
-        .outerjoin(CustomerAddress, Booking.address_id == CustomerAddress.id)
-        .outerjoin(
-            latest_assign,
-            latest_assign.c.booking_id == Booking.id,
+        rows = result.all()
+
+        jobs = []
+        for booking, customer, addr, assignment, assigned_at in rows:
+            if addr:
+                address_parts = [
+                    addr.address_line1 or "",
+                    addr.address_line2 or "",
+                    addr.city or "",
+                    addr.state or "",
+                    addr.pincode or "",
+                ]
+                resolved_city = addr.city
+            else:
+                address_parts = [
+                    booking.address_line or "",
+                    booking.city or "",
+                    booking.pincode or "",
+                ]
+                resolved_city = booking.city
+
+            full_address = ", ".join(p for p in address_parts if p) or "Address not provided"
+            booking_status = booking.status.value if hasattr(booking.status, "value") else str(booking.status)
+
+            jobs.append({
+                "assignment_id":  str(assignment.id) if assignment else None,
+                "booking_id":     str(booking.id),
+                "booking_number": booking.booking_number,
+                "status":         booking_status,
+                "customer_name":  customer.name if customer else "Customer",
+                "address":        full_address,
+                "city":           resolved_city,
+                "scheduled_date": str(booking.scheduled_date) if booking.scheduled_date else None,
+                "scheduled_time": booking.scheduled_slot or None,
+                "service_name":   booking.service_name or None,
+                "customer_phone": customer.mobile if customer else None,
+                "latitude":       float(addr.latitude) if addr and addr.latitude else None,
+                "longitude":      float(addr.longitude) if addr and addr.longitude else None,
+                # Sorting metadata — used by the app to keep newest-assigned first
+                "assigned_at":    assigned_at.isoformat() if assigned_at else booking.created_at.isoformat(),
+                # Inspection data — so captain app knows if CCO already submitted
+                "inspection_notes":         booking.inspection_notes,
+                "inspection_photos":        (json.loads(booking.inspection_photos) if booking.inspection_photos else []),
+                "inspection_submitted_by":  booking.inspection_submitted_by,
+                # Repair stage before RESCHEDULED — captain app uses this to resume
+                # at the correct step (e.g. IN_PROGRESS) instead of treating the
+                # rescheduled booking as a brand-new visit.
+                "pre_reschedule_status":    booking.pre_reschedule_status,
+            })
+
+        return success_response(data={"jobs": jobs, "total": len(jobs)})
+
+    except Exception as exc:
+        logger.error(
+            "[captain/me/jobs] Unhandled error: %s\n%s",
+            exc, traceback.format_exc()
         )
-        .outerjoin(
-            AssignmentHistory,
-            (AssignmentHistory.booking_id == Booking.id)
-            & (AssignmentHistory.technician_id == tech.id)
-            & (AssignmentHistory.created_at == latest_assign.c.assigned_at),
-        )
-        .where(
-            Booking.technician_id == tech.id,
-            # Exclude ASSIGNED (pending acceptance — shown in incoming screen, not jobs list)
-            # Exclude CANCELLED
-            Booking.status.notin_(["CANCELLED", "ASSIGNED"]),
-            # Active jobs: always included
-            # Completed/closed/paid: only within 30-day window
-            (
-                Booking.status.notin_(["COMPLETED", "PAID", "CLOSED", "SETTLED"])
-                | (Booking.updated_at >= cutoff)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to load jobs due to a server error. "
+                "This is likely a database schema issue — a required column may be "
+                f"missing from the VPS database. Error: {type(exc).__name__}: {exc}"
             ),
         )
-        .order_by(latest_assign.c.assigned_at.desc().nullslast(), Booking.created_at.desc())
-        .limit(100)
-    )
-    rows = result.all()
-
-    jobs = []
-    for booking, customer, addr, assignment, assigned_at in rows:
-        if addr:
-            address_parts = [
-                addr.address_line1 or "",
-                addr.address_line2 or "",
-                addr.city or "",
-                addr.state or "",
-                addr.pincode or "",
-            ]
-            resolved_city = addr.city
-        else:
-            address_parts = [
-                booking.address_line or "",
-                booking.city or "",
-                booking.pincode or "",
-            ]
-            resolved_city = booking.city
-
-        full_address = ", ".join(p for p in address_parts if p) or "Address not provided"
-        booking_status = booking.status.value if hasattr(booking.status, "value") else str(booking.status)
-
-        jobs.append({
-            "assignment_id":  str(assignment.id) if assignment else None,
-            "booking_id":     str(booking.id),
-            "booking_number": booking.booking_number,
-            "status":         booking_status,
-            "customer_name":  customer.name if customer else "Customer",
-            "address":        full_address,
-            "city":           resolved_city,
-            "scheduled_date": str(booking.scheduled_date) if booking.scheduled_date else None,
-            "scheduled_time": booking.scheduled_slot or None,
-            "service_name":   booking.service_name or None,
-            "customer_phone": customer.mobile if customer else None,
-            "latitude":       float(addr.latitude) if addr and addr.latitude else None,
-            "longitude":      float(addr.longitude) if addr and addr.longitude else None,
-            # Sorting metadata — used by the app to keep newest-assigned first
-            "assigned_at":    assigned_at.isoformat() if assigned_at else booking.created_at.isoformat(),
-            # Inspection data — so captain app knows if CCO already submitted
-            "inspection_notes":         booking.inspection_notes,
-            "inspection_photos":        (json.loads(booking.inspection_photos) if booking.inspection_photos else []),
-            "inspection_submitted_by":  booking.inspection_submitted_by,
-            # Repair stage before RESCHEDULED — captain app uses this to resume
-            # at the correct step (e.g. IN_PROGRESS) instead of treating the
-            # rescheduled booking as a brand-new visit.
-            "pre_reschedule_status":    booking.pre_reschedule_status,
-        })
-
-    return success_response(data={"jobs": jobs, "total": len(jobs)})
 
 
 @router.get("/me/jobs/pending", summary="Captain: pending job requests awaiting accept/reject [Technician]")

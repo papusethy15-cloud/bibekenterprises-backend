@@ -23,6 +23,7 @@ Booking assignment lifecycle
 
 import asyncio
 import logging
+import traceback
 import math
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -1184,85 +1185,102 @@ async def get_assignment_candidates(
 ):
     from app.models.customer import CustomerAddress as _AddrModel
 
-    booking = await _get_booking_or_404(db, UUID(booking_id))
-    rules   = await _get_default_rules(db)
+    try:
+        booking = await _get_booking_or_404(db, UUID(booking_id))
+        rules   = await _get_default_rules(db)
 
-    technicians = (await db.execute(select(Technician).where(Technician.status == TechnicianStatus.ACTIVE))).scalars().all()
-    skill_rows  = (await db.execute(select(TechnicianSkill).where(TechnicianSkill.service_id == booking.service_id))).scalars().all()
-    skill_match_ids = {row.technician_id for row in skill_rows}
+        technicians = (await db.execute(select(Technician).where(Technician.status == TechnicianStatus.ACTIVE))).scalars().all()
+        skill_rows  = (await db.execute(select(TechnicianSkill).where(TechnicianSkill.service_id == booking.service_id))).scalars().all()
+        skill_match_ids = {row.technician_id for row in skill_rows}
 
-    address = None
-    if booking.address_id:
-        address = (await db.execute(select(_AddrModel).where(_AddrModel.id == booking.address_id))).scalar_one_or_none()
+        address = None
+        if booking.address_id:
+            address = (await db.execute(select(_AddrModel).where(_AddrModel.id == booking.address_id))).scalar_one_or_none()
 
-    candidates = []
-    for tech in technicians:
-        workload     = await _get_active_workload(db, tech.id)
-        skill_pts    = 50.0 if tech.id in skill_match_ids else 0.0
-        rating_pts   = (tech.rating * 20) if rules.prefer_high_rating else 0.0
-        workload_pts = max(0, 30 - workload * 10) if rules.prefer_low_workload else 0.0
-        jobs_pts     = max(0, 20 - (tech.total_jobs or 0) * 0.1)
-        proximity_pts = 0.0
-        dist_km       = None
-        if address and getattr(address, "latitude", None) and getattr(address, "longitude", None) and tech.last_lat and tech.last_lng:
-            dist_km = round(_haversine_km(tech.last_lat, tech.last_lng, address.latitude, address.longitude), 1)
-            proximity_pts = max(0, 30 - dist_km)
-        total_score = skill_pts + rating_pts + workload_pts + jobs_pts + proximity_pts
-        same_city = bool(address and tech.city and tech.city.lower() == address.city.lower())
+        candidates = []
+        for tech in technicians:
+            workload     = await _get_active_workload(db, tech.id)
+            skill_pts    = 50.0 if tech.id in skill_match_ids else 0.0
+            rating_pts   = (tech.rating * 20) if rules.prefer_high_rating else 0.0
+            workload_pts = max(0, 30 - workload * 10) if rules.prefer_low_workload else 0.0
+            jobs_pts     = max(0, 20 - (tech.total_jobs or 0) * 0.1)
+            proximity_pts = 0.0
+            dist_km       = None
+            if address and getattr(address, "latitude", None) and getattr(address, "longitude", None) and tech.last_lat and tech.last_lng:
+                dist_km = round(_haversine_km(tech.last_lat, tech.last_lng, address.latitude, address.longitude), 1)
+                proximity_pts = max(0, 30 - dist_km)
+            total_score = skill_pts + rating_pts + workload_pts + jobs_pts + proximity_pts
+            same_city = bool(address and tech.city and tech.city.lower() == address.city.lower())
 
-        # Slot capacity check for candidates list
-        _c_slot = getattr(booking, "scheduled_slot", None)
-        _c_date = getattr(booking, "scheduled_date", None)
-        slot_booking_count = 0
-        slot_available = True
-        if _c_slot and _c_date:
-            _c_date_only = _c_date.date() if hasattr(_c_date, "date") else _c_date
-            slot_booking_count = await _get_slot_booking_count(db, tech.id, _c_date_only, _c_slot)
-            slot_available = slot_booking_count < MAX_BOOKINGS_PER_SLOT
+            # Slot capacity check for candidates list
+            _c_slot = getattr(booking, "scheduled_slot", None)
+            _c_date = getattr(booking, "scheduled_date", None)
+            slot_booking_count = 0
+            slot_available = True
+            if _c_slot and _c_date:
+                _c_date_only = _c_date.date() if hasattr(_c_date, "date") else _c_date
+                slot_booking_count = await _get_slot_booking_count(db, tech.id, _c_date_only, _c_slot)
+                slot_available = slot_booking_count < MAX_BOOKINGS_PER_SLOT
 
-        candidates.append({
-            "technician_id":   str(tech.id),
-            "name":            tech.name,
-            "mobile":          tech.mobile,
-            "city":            tech.city or "",
-            "area":            tech.area or "",
-            "is_online":       tech.is_online,
-            "rating":          tech.rating,
-            "total_jobs":      tech.total_jobs or 0,
-            "active_workload": workload,
-            "max_workload":    rules.max_active_bookings,
-            "profile_image":   tech.profile_image,
-            "skill_match":     tech.id in skill_match_ids,
-            "same_city":       same_city,
-            "overloaded":      workload >= rules.max_active_bookings,
-            "slot_booking_count":  slot_booking_count,
-            "slot_available":      slot_available,
-            "slot_unavailable_reason": (
-                f"Already has {slot_booking_count}/{MAX_BOOKINGS_PER_SLOT} booking(s) in this slot"
-                if not slot_available else None
-            ),
-            "score":           round(total_score, 1),
-            "distance_km":     dist_km,
-            "last_lat":        tech.last_lat,
-            "last_lng":        tech.last_lng,
-            "last_seen_at":    tech.last_seen_at.isoformat() if getattr(tech, "last_seen_at", None) else None,
-            "score_breakdown": {
-                "skill":     round(skill_pts, 1),
-                "rating":    round(rating_pts, 1),
-                "workload":  round(workload_pts, 1),
-                "jobs":      round(jobs_pts, 1),
-                "proximity": round(proximity_pts, 1),
-            },
+            candidates.append({
+                "technician_id":   str(tech.id),
+                "name":            tech.name,
+                "mobile":          tech.mobile,
+                "city":            tech.city or "",
+                "area":            tech.area or "",
+                "is_online":       tech.is_online,
+                "rating":          tech.rating,
+                "total_jobs":      tech.total_jobs or 0,
+                "active_workload": workload,
+                "max_workload":    rules.max_active_bookings,
+                "profile_image":   tech.profile_image,
+                "skill_match":     tech.id in skill_match_ids,
+                "same_city":       same_city,
+                "overloaded":      workload >= rules.max_active_bookings,
+                "slot_booking_count":  slot_booking_count,
+                "slot_available":      slot_available,
+                "slot_unavailable_reason": (
+                    f"Already has {slot_booking_count}/{MAX_BOOKINGS_PER_SLOT} booking(s) in this slot"
+                    if not slot_available else None
+                ),
+                "score":           round(total_score, 1),
+                "distance_km":     dist_km,
+                "last_lat":        tech.last_lat,
+                "last_lng":        tech.last_lng,
+                "last_seen_at":    tech.last_seen_at.isoformat() if getattr(tech, "last_seen_at", None) else None,
+                "score_breakdown": {
+                    "skill":     round(skill_pts, 1),
+                    "rating":    round(rating_pts, 1),
+                    "workload":  round(workload_pts, 1),
+                    "jobs":      round(jobs_pts, 1),
+                    "proximity": round(proximity_pts, 1),
+                },
+            })
+
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return success_response(data={
+            "candidates":             candidates,
+            "booking_id":             booking_id,
+            "booking_number":         booking.booking_number,
+            "scheduled_slot":         booking.scheduled_slot,
+            "scheduled_date":         booking.scheduled_date.strftime("%Y-%m-%d") if booking.scheduled_date else None,
+            "max_bookings_per_slot":  MAX_BOOKINGS_PER_SLOT,
+            "current_technician_id":  str(booking.technician_id) if booking.technician_id else None,
+            "total":                  len(candidates),
         })
 
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    return success_response(data={
-        "candidates":             candidates,
-        "booking_id":             booking_id,
-        "booking_number":         booking.booking_number,
-        "scheduled_slot":         booking.scheduled_slot,
-        "scheduled_date":         booking.scheduled_date.strftime("%Y-%m-%d") if booking.scheduled_date else None,
-        "max_bookings_per_slot":  MAX_BOOKINGS_PER_SLOT,
-        "current_technician_id":  str(booking.technician_id) if booking.technician_id else None,
-        "total":                  len(candidates),
-    })
+    except HTTPException:
+        raise  # re-raise 404 booking-not-found as-is
+    except Exception as exc:
+        logger.error(
+            "[assignments/candidates/%s] Unhandled error: %s\n%s",
+            booking_id, exc, traceback.format_exc()
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to load technician candidates due to a server error. "
+                "This is likely a database schema issue — a required column may be "
+                f"missing from the VPS database. Error: {type(exc).__name__}: {exc}"
+            ),
+        )
