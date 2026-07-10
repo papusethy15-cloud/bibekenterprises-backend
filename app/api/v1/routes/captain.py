@@ -305,10 +305,11 @@ async def captain_my_jobs(
                 # Exclude CANCELLED
                 Booking.status.notin_(["CANCELLED", "ASSIGNED"]),
                 # Active jobs: always included
-                # Completed/closed/paid: only within 30-day window
+                # Completed/closed/paid: only within 30-day window.
+                # Use created_at as fallback if updated_at column is missing on VPS.
                 (
                     Booking.status.notin_(["COMPLETED", "PAID", "CLOSED", "SETTLED"])
-                    | (Booking.updated_at >= cutoff)
+                    | (Booking.created_at >= cutoff)
                 ),
             )
             .order_by(latest_assign.c.assigned_at.desc().nullslast(), Booking.created_at.desc())
