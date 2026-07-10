@@ -478,8 +478,13 @@ async def admin_list_settlements(
     from app.models.user import User
     from sqlalchemy import func, or_
 
-    # Include both CLOSED and SETTLED bookings on the settlements page
+    # Include PAID, COMPLETED, CLOSED and SETTLED bookings on the settlements page.
+    # PAID = cash collected by technician & deposited to admin (most common flow).
+    # COMPLETED = work done but invoice not yet finalized.
+    # CLOSED / SETTLED = admin-verified final states.
     status_filter = or_(
+        Booking.status == BookingStatus.PAID,
+        Booking.status == BookingStatus.COMPLETED,
         Booking.status == BookingStatus.CLOSED,
         Booking.status == BookingStatus.SETTLED,
     )
