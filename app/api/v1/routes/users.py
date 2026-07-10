@@ -148,9 +148,16 @@ async def _ensure_unique_user_fields(
     existing = (await db.execute(query)).scalars().all()
     for item in existing:
         if mobile and item.mobile == mobile:
-            raise HTTPException(status_code=400, detail="Mobile number already exists")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Mobile number {mobile} is already registered"
+                    + (f" as a {item.role.value.lower().replace('_', ' ')}" if hasattr(item, "role") else "")
+                    + ". Each user must have a unique mobile number across all roles."
+                )
+            )
         if email and item.email == email:
-            raise HTTPException(status_code=400, detail="Email already exists")
+            raise HTTPException(status_code=400, detail=f"Email {email} is already registered to another account.")
 
 
 async def _ensure_rbac_seeded(db: AsyncSession):

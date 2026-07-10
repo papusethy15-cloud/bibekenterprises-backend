@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime, date
+from app.utils.phone import normalize_mobile
 
 
 class CreateTechnicianRequest(BaseModel):
@@ -28,6 +29,25 @@ class CreateTechnicianRequest(BaseModel):
 
     # Availability schedule
     availability: Optional[List[dict]] = None       # [{ day_of_week, start_time, end_time, is_available }]
+
+    @field_validator("mobile", mode="before")
+    @classmethod
+    def _norm_mobile(cls, v):
+        return normalize_mobile(v)
+
+    @field_validator("alternate_mobile", "emergency_contact_mobile", mode="before")
+    @classmethod
+    def _norm_optional_mobile(cls, v):
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return None
+        return normalize_mobile(v)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _empty_email_to_none(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
 
 class UpdateTechnicianRequest(BaseModel):

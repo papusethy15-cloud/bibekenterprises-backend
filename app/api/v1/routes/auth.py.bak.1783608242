@@ -23,30 +23,6 @@ router = APIRouter()
 async def get_redis():
     return aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
-def _normalize_mobile(mobile: str) -> list[str]:
-    """Return a list of mobile number variants to try in DB lookups.
-    
-    The DB may store numbers as:
-      - '7008691022'       (10-digit, no prefix)
-      - '+917008691022'    (E.164 with + prefix)
-      - '917008691022'     (with country code, no +)
-    
-    Flutter sends the bare 10-digit number. We search all variants so
-    the backend works regardless of how the admin added the technician.
-    """
-    # Strip leading + or 91
-    stripped = mobile.lstrip('+')
-    if stripped.startswith('91') and len(stripped) == 12:
-        ten_digit = stripped[2:]
-    else:
-        ten_digit = stripped[-10:]  # take last 10 digits
-    return [
-        ten_digit,           # 7008691022
-        f'+91{ten_digit}',   # +917008691022
-        f'91{ten_digit}',    # 917008691022
-    ]
-
-
 async def _issue_otp(mobile: str) -> str:
     otp = generate_otp()
     r = await get_redis()
@@ -309,33 +285,19 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Dep
 
 @router.post("/technician/send-otp", summary="Captain: request OTP (technician mobile)")
 async def technician_send_otp(payload: SendOTPRequest, db: AsyncSession = Depends(get_db)):
-    # Try all mobile number formats stored in DB (e.g. 7008691022 / +917008691022 / 917008691022)
-    user = None
-    for mobile_variant in _normalize_mobile(payload.mobile):
-        result = await db.execute(select(User).where(User.mobile == mobile_variant))
-        user = result.scalar_one_or_none()
-        if user:
-            break
-
+    result = await db.execute(select(User).where(User.mobile == payload.mobile))
+    user = result.scalar_one_or_none()
     if not user or user.role.value != "TECHNICIAN":
-        # Return 404 so the Flutter app can show a clear error message.
-        # The message is generic enough to avoid disclosing registration status.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="This mobile number is not registered as a technician. Please contact your administrator."
+        # Return same message to avoid role enumeration
+        return success_response(
+            data={"expires_in": f"{settings.OTP_EXPIRE_MINUTES} minutes"},
+            message="If the mobile is registered as a technician, an OTP has been sent"
         )
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been suspended. Please contact your administrator."
-        )
-    # Store OTP keyed to the canonical mobile (what the app sends) so verify-otp can find it
     otp = await _issue_otp(payload.mobile)
-    # TODO: send via SMS gateway. For now, otp is returned in body so the app
-    # can show the yellow dev-mode banner and auto-fill the OTP.
+    # TODO: send via SMS gateway
     return success_response(
         data={"otp": otp, "expires_in": f"{settings.OTP_EXPIRE_MINUTES} minutes"},
-        message="OTP sent successfully"
+        message="OTP sent"
     )
 
 
@@ -347,14 +309,8 @@ async def technician_verify_otp(payload: VerifyOTPRequest, db: AsyncSession = De
     if not stored_otp or stored_otp != payload.otp:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired OTP")
     await r.delete(key)
-    # Search all mobile format variants (same logic as send-otp) so verify
-    # succeeds regardless of how the number was stored in the DB.
-    user = None
-    for mobile_variant in _normalize_mobile(payload.mobile):
-        result = await db.execute(select(User).where(User.mobile == mobile_variant))
-        user = result.scalar_one_or_none()
-        if user:
-            break
+    result = await db.execute(select(User).where(User.mobile == payload.mobile))
+    user = result.scalar_one_or_none()
     if not user or user.role.value != "TECHNICIAN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a registered technician")
     if not user.is_active:
@@ -369,7 +325,6 @@ async def technician_verify_otp(payload: VerifyOTPRequest, db: AsyncSession = De
         "token_type":    "bearer",
         "user_id":       str(user.id),
         "role":          user.role.value,
-        "name":          user.name,
     }, message="Login successful")
 
 

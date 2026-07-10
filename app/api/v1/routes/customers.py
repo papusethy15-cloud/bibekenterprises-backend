@@ -231,9 +231,15 @@ async def create_customer(
     current_user: dict = Depends(AdminOrCCO),
     db: AsyncSession = Depends(get_db)
 ):
-    existing = (await db.execute(select(Customer).where(Customer.mobile == payload.mobile))).scalar_one_or_none()
-    if existing:
-        raise HTTPException(status_code=400, detail="Customer with this mobile already exists")
+    # Cross-role uniqueness: check Users table (covers Customer, Technician, CCO, Admin, etc.)
+    existing_user = (await db.execute(select(User).where(User.mobile == payload.mobile))).scalar_one_or_none()
+    if existing_user:
+        role_label = existing_user.role.value.lower().replace("_", " ")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mobile number {payload.mobile} is already registered as a {role_label}. "
+                   "Mobile numbers must be unique across all user types."
+        )
     user = User(name=payload.name, mobile=payload.mobile, email=payload.email,
                 role=UserRole.CUSTOMER, is_verified=True)
     db.add(user)

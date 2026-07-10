@@ -73,10 +73,11 @@ async def create_technician(
         select(User).where(User.mobile == payload.mobile)
     )).scalar_one_or_none()
     if existing_mobile:
+        role_label = existing_mobile.role.value.lower().replace("_", " ")
         raise HTTPException(
             status_code=400,
-            detail=f"A user with mobile {payload.mobile} already exists. "
-                   "Each technician needs a unique mobile number."
+            detail=f"Mobile number {payload.mobile} is already registered as a {role_label}. "
+                   "Mobile numbers must be unique across customers, technicians, and staff."
         )
 
     if payload.email:
