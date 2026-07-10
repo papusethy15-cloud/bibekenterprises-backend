@@ -2219,8 +2219,8 @@ async def settle_booking(
     from app.websocket.manager import ADMIN_BOOKINGS_ROOM, booking_room, technician_room, WSEvent
     track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.BOOKING_STATUS_CHANGED, _settle_payload))
     track_task(publish_event(booking_room(str(booking_id)), WSEvent.BOOKING_STATUS_CHANGED, _settle_payload))
-    # Also fire PAYMENT_COLLECTED for notification system
-    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.PAYMENT_COLLECTED, _settle_payload))
+    # Also fire PAYMENT_RECEIVED for notification system
+    track_task(publish_event(ADMIN_BOOKINGS_ROOM, WSEvent.PAYMENT_RECEIVED, _settle_payload))
     # ── Notify technician (FCM + notification record) ─────────────────────
     if tech:
         track_task(push_to_technician(

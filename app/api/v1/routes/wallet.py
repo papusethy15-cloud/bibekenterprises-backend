@@ -532,6 +532,7 @@ async def admin_list_settlements(
         rows.append({
             "booking_id":       str(b.id),
             "booking_number":   b.booking_number,
+            "booking_status":   b.status.value if hasattr(b.status, "value") else str(b.status),
             "customer_name":    customer_name,
             "customer_mobile":  customer_mobile,
             # Booking model uses total_amount; fall back to 0
