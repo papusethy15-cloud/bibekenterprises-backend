@@ -1821,3 +1821,269 @@ async def repair_coupon_counts(
         "coupons_fixed": fixed_coupons,
         "quotations_repaired": repaired_quotations,
     }, message=f"Repair complete: {len(fixed_coupons)} coupon counts fixed, {len(repaired_quotations)} quotations repaired")
+
+
+# ─── Quotation PDF download ───────────────────────────────────────────────────
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors as rl_colors
+from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, SimpleDocTemplate, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
+import logging as _logging
+_pdf_logger = _logging.getLogger(__name__)
+
+
+def _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts) -> bytes:
+    """Builds a professional quotation PDF using ReportLab platypus."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=20 * mm,
+        title=f"Quotation {quotation.quotation_number}",
+    )
+
+    styles = getSampleStyleSheet()
+    brand_color = rl_colors.HexColor("#1D4ED8")
+    orange_color = rl_colors.HexColor("#F97316")
+    ink_dark = rl_colors.HexColor("#111827")
+    ink_mid = rl_colors.HexColor("#6B7280")
+    ink_light = rl_colors.HexColor("#F3F4F6")
+
+    h1 = ParagraphStyle("h1", fontSize=18, fontName="Helvetica-Bold", textColor=brand_color, leading=22)
+    h2 = ParagraphStyle("h2", fontSize=12, fontName="Helvetica-Bold", textColor=ink_dark, leading=16)
+    normal = ParagraphStyle("normal", fontSize=9, fontName="Helvetica", textColor=ink_dark, leading=14)
+    small = ParagraphStyle("small", fontSize=8, fontName="Helvetica", textColor=ink_mid, leading=12)
+    right = ParagraphStyle("right", fontSize=9, fontName="Helvetica", textColor=ink_dark, leading=14, alignment=TA_RIGHT)
+    bold = ParagraphStyle("bold", fontSize=9, fontName="Helvetica-Bold", textColor=ink_dark, leading=14)
+    total_style = ParagraphStyle("total", fontSize=11, fontName="Helvetica-Bold", textColor=brand_color, leading=16, alignment=TA_RIGHT)
+
+    domain_name = domain_profile.get("business_name") if domain_profile else "Bibek Enterprises"
+    domain_address = domain_profile.get("address", "") if domain_profile else ""
+    domain_gstin = domain_profile.get("gstin", "") if domain_profile else ""
+
+    cust_name = f"{customer.first_name or ''} {customer.last_name or ''}".strip() or "Customer"
+    cust_mobile = customer.mobile_number or ""
+
+    booking_no = booking.booking_number if booking else "—"
+    service_name = booking.service_name if hasattr(booking, "service_name") and booking.service_name else "Service"
+
+    status_label = {
+        "DRAFT": "Draft",
+        "SUBMITTED": "Pending Approval",
+        "APPROVED": "Approved",
+        "REJECTED": "Rejected",
+        "REVISED": "Revised",
+        "CONVERTED_TO_INVOICE": "Converted to Invoice",
+        "EXPIRED": "Expired",
+    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), "Unknown")
+
+    story = []
+
+    # Header row
+    header_data = [
+        [
+            Paragraph(domain_name or "Bibek Enterprises", h1),
+            Paragraph(f"QUOTATION<br/><font size=9 color='#6B7280'>{quotation.quotation_number}</font>", ParagraphStyle("qno", fontSize=18, fontName="Helvetica-Bold", textColor=orange_color, alignment=TA_RIGHT, leading=22)),
+        ]
+    ]
+    header_table = Table(header_data, colWidths=["60%", "40%"])
+    header_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(header_table)
+
+    if domain_address:
+        story.append(Paragraph(domain_address, small))
+    if domain_gstin:
+        story.append(Paragraph(f"GSTIN: {domain_gstin}", small))
+    story.append(HRFlowable(width="100%", thickness=1, color=rl_colors.HexColor("#E5E7EB"), spaceAfter=8))
+
+    # Info row
+    created_str = ""
+    try:
+        import datetime as _dt
+        if quotation.created_at:
+            dt = quotation.created_at if hasattr(quotation.created_at, "strftime") else _dt.datetime.fromisoformat(str(quotation.created_at))
+            created_str = dt.strftime("%-d %b %Y")
+    except Exception:
+        created_str = str(quotation.created_at or "")
+
+    info_data = [
+        [
+            Paragraph(f"<b>Bill To</b><br/>{cust_name}<br/>{cust_mobile}", normal),
+            Paragraph(f"<b>Booking</b><br/>#{booking_no}<br/>{service_name}", normal),
+            Paragraph(f"<b>Date</b><br/>{created_str}<br/><b>Status:</b> {status_label}", normal),
+        ]
+    ]
+    info_table = Table(info_data, colWidths=["33%", "33%", "34%"])
+    info_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (-1, -1), ink_light),
+        ("ROUNDEDCORNERS", [5]),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#E5E7EB")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 10))
+
+    # Line items table
+    item_header = ["#", "Description", "Qty", "Unit Price", "Total"]
+    item_rows = [item_header]
+    idx = 1
+    for s in services:
+        item_rows.append([
+            str(idx),
+            s.service_name or s.custom_service_name or "—",
+            str(s.quantity),
+            f"\u20b9{s.unit_price:.0f}",
+            f"\u20b9{s.total_price:.0f}",
+        ])
+        idx += 1
+    for p in parts:
+        item_rows.append([
+            str(idx),
+            f"{p.part_name} (Part)",
+            str(p.quantity),
+            f"\u20b9{p.unit_price:.0f}",
+            f"\u20b9{p.total_price:.0f}",
+        ])
+        idx += 1
+
+    col_widths = [8 * mm, None, 15 * mm, 30 * mm, 30 * mm]
+    items_table = Table(item_rows, colWidths=col_widths, repeatRows=1)
+    items_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), brand_color),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 9),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#F9FAFB")]),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#E5E7EB")),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(items_table)
+    story.append(Spacer(1, 8))
+
+    # Totals
+    totals_data = []
+    if float(quotation.discount_amount or 0) > 0:
+        totals_data.append(["Discount:", f"-\u20b9{float(quotation.discount_amount):.0f}"])
+    if float(quotation.adjustment_amount or 0) != 0:
+        totals_data.append(["Adjustment:", f"\u20b9{float(quotation.adjustment_amount):.0f}"])
+    totals_data.append([f"Tax ({float(quotation.tax_percent or 0):.0f}%):", f"\u20b9{float(quotation.tax_amount or 0):.0f}"])
+    totals_data.append(["TOTAL AMOUNT:", f"\u20b9{float(quotation.total_amount or 0):.0f}"])
+
+    totals_table = Table(
+        [[Paragraph(r[0], right if i < len(totals_data) - 1 else ParagraphStyle("tl", fontSize=11, fontName="Helvetica-Bold", alignment=TA_RIGHT, textColor=ink_dark)),
+          Paragraph(r[1], right if i < len(totals_data) - 1 else total_style)]
+         for i, r in enumerate(totals_data)],
+        colWidths=["75%", "25%"],
+    )
+    totals_table.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LINEABOVE", (0, -1), (-1, -1), 1, brand_color),
+    ]))
+    story.append(totals_table)
+
+    if quotation.remarks:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"<b>Notes:</b> {quotation.remarks}", small))
+
+    # Footer
+    story.append(Spacer(1, 16))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=rl_colors.HexColor("#E5E7EB")))
+    story.append(Paragraph("This is a computer-generated quotation and does not require a signature.", small))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.read()
+
+
+@router.get("/{quotation_id}/pdf", summary="Download Quotation PDF")
+async def get_quotation_pdf(
+    quotation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(AnyAuthenticated),
+):
+    """
+    Generate and stream a professional quotation PDF.
+    Accessible by the customer who owns the booking, the assigned technician,
+    admin, CCO, and accountant roles.
+    """
+    from sqlalchemy import select
+    from app.models.customer import Customer
+    from app.models.booking import Booking
+    from app.models.domain import Domain
+
+    quotation = await _get_quotation_or_404(db, quotation_id)
+    await _ensure_access(db, quotation, current_user)
+
+    booking = (await db.execute(select(Booking).where(Booking.id == quotation.booking_id))).scalar_one_or_none()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    customer = (await db.execute(select(Customer).where(Customer.id == booking.customer_id))).scalar_one_or_none()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Load domain profile for branding
+    domain_profile = None
+    try:
+        domain = (await db.execute(select(Domain).where(Domain.id == booking.domain_id))).scalar_one_or_none()
+        if domain:
+            domain_profile = {
+                "business_name": domain.business_name or domain.name,
+                "address": domain.address or "",
+                "gstin": domain.gstin or "",
+            }
+    except Exception:
+        pass
+
+    # Load services and parts line items
+    services = (await db.execute(
+        select(QuotationServiceItem).where(QuotationServiceItem.quotation_id == quotation.id)
+    )).scalars().all()
+    parts = (await db.execute(
+        select(QuotationPartItem).where(QuotationPartItem.quotation_id == quotation.id)
+    )).scalars().all()
+
+    try:
+        pdf_bytes = _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts)
+    except Exception:
+        _pdf_logger.exception("Quotation PDF generation failed, falling back to plain layout")
+        buf = BytesIO()
+        c = rl_canvas.Canvas(buf)
+        c.setTitle(quotation.quotation_number)
+        c.drawString(50, 800, f"Quotation: {quotation.quotation_number}")
+        c.drawString(50, 780, f"Total Amount: INR {float(quotation.total_amount or 0):.2f}")
+        c.showPage()
+        c.save()
+        buf.seek(0)
+        pdf_bytes = buf.read()
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={quotation.quotation_number}.pdf"},
+    )

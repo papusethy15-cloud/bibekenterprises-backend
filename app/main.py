@@ -246,7 +246,7 @@ async def _auto_retry_unassigned_bookings():
                 _logger.info(f"[AUTO-RETRY] Found {len(unassigned)} unassigned bookings to retry")
 
                 from app.api.v1.routes.assignments import (
-                    _get_default_rules, _apply_assignment, _timeout_watcher,
+                    _get_default_rules, _apply_assignment, _two_phase_watcher,
                     _pick_best_technician_online,
                 )
                 from app.utils.auto_assign import escalate_to_manual, get_system_user_id
@@ -423,10 +423,10 @@ async def _auto_retry_unassigned_bookings():
                                     AssignmentHistory.status == AssignmentStatus.ASSIGNED,
                                 ).order_by(AssignmentHistory.created_at.desc())
                             )).scalars().first()
-                            if new_asgn:
-                                track_task(_timeout_watcher(
+                            if new_asgn and new_asgn.response_deadline:
+                                track_task(_two_phase_watcher(
                                     str(new_asgn.id), bid, str(best_tech.id),
-                                    rules.response_timeout_minutes,
+                                    new_asgn.response_deadline,
                                 ))
                         except Exception as _ae:
                             _logger.warning(f"[AUTO-RETRY] No candidate for {booking.booking_number}: {_ae}", exc_info=True)

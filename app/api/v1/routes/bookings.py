@@ -200,8 +200,8 @@ async def _maybe_auto_assign(booking_id_str: str, booking_number: str, triggered
             )).scalar_one()
             if online_count == 0:
                 _logger.info(f"Auto-assign: no online technicians — flagging booking {booking_number} for deferred assignment")
-                # Mark the booking so it will be auto-assigned when a technician comes online
-                if booking and not booking.technician_id:
+                # Mark the booking (PENDING or CONFIRMED) so it will be auto-assigned when a technician comes online
+                if booking and not booking.technician_id and booking.status in (BookingStatus.PENDING, BookingStatus.CONFIRMED):
                     existing_notes = booking.notes or ""
                     if "[PENDING_AUTO_ASSIGN]" not in existing_notes:
                         booking.notes = (existing_notes + "\n[PENDING_AUTO_ASSIGN]").strip()
@@ -234,8 +234,10 @@ async def _maybe_auto_assign(booking_id_str: str, booking_number: str, triggered
 async def _pick_best_technician_online(db: AsyncSession, booking: "Booking", rules):
     """
     Variant of _pick_best_technician that restricts candidates to is_online=True technicians.
-    Falls back silently if none qualify — caller handles the HTTPException.
+    Falls back to all online technicians when skill filter would leave zero candidates.
     """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
     from app.models.technician import Technician as _Tech, TechnicianSkill, TechnicianStatus
     from app.models.customer import CustomerAddress
     from app.api.v1.routes.assignments import _haversine_km, _get_active_workload, ACTIVE_BOOKING_STATUSES
@@ -258,10 +260,18 @@ async def _pick_best_technician_online(db: AsyncSession, booking: "Booking", rul
     ).scalars().all()
     skill_match_ids = {row.technician_id for row in skill_rows}
 
-    if rules.require_skill_match:
-        technicians = [t for t in technicians if t.id in skill_match_ids]
-        if not technicians:
-            raise HTTPException(status_code=404, detail="No online technician with required skill")
+    if rules.require_skill_match and skill_match_ids:
+        # Only enforce skill filter when skills are actually registered for this service.
+        # If no skills are mapped to the service, fall back to all online technicians
+        # (avoids silent failure when skills table is empty during initial setup).
+        skilled = [t for t in technicians if t.id in skill_match_ids]
+        if skilled:
+            technicians = skilled
+        else:
+            _logger.warning(
+                f"Auto-assign: require_skill_match=True but no technician has skill for "
+                f"service {booking.service_id} — falling back to all {len(technicians)} online technician(s)"
+            )
 
     address = None
     _booking_lat, _booking_lng = None, None
@@ -330,12 +340,15 @@ async def _sweep_pending_auto_assign(triggered_by_user_id: str) -> None:
             if enabled != "true":
                 return
 
-            # Find PENDING, unassigned bookings flagged for deferred assign
+            # Find all unassigned PENDING/CONFIRMED bookings.
+            # Includes both:
+            #   a) Bookings flagged with [PENDING_AUTO_ASSIGN] (created after this fix)
+            #   b) Any PENDING/CONFIRMED booking with no technician (safety net for older bookings)
+            # (website bookings start as PENDING; CCO/Admin bookings start as CONFIRMED)
             pending_bookings = (await db.execute(
                 select(Booking).where(
-                    Booking.status == BookingStatus.PENDING,
+                    Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED]),
                     Booking.technician_id == None,
-                    Booking.notes.like("%[PENDING_AUTO_ASSIGN]%"),
                 )
             )).scalars().all()
 
@@ -394,6 +407,25 @@ async def create_booking(
         customer = result.scalar_one_or_none()
         if not customer:
             raise HTTPException(status_code=404, detail="Customer profile not found")
+
+    # ── Profile completeness gate (customers only) ─────────────────────────────
+    # Block booking if the customer's name is missing or is a system placeholder
+    # (e.g. "New Customer", "New User") or their mobile number is missing.
+    # Admins/CCO creating bookings on behalf of customers are exempt.
+    _PLACEHOLDER_NAMES = {"new customer", "new user", "customer", "user"}
+    if customer and current_user["role"] == "CUSTOMER":
+        _cust_name = (customer.name or "").strip()
+        _cust_mobile = (customer.mobile or "").strip()
+        if not _cust_name or _cust_name.lower() in _PLACEHOLDER_NAMES:
+            raise HTTPException(
+                status_code=422,
+                detail="INCOMPLETE_PROFILE:name:Please update your name before booking."
+            )
+        if not _cust_mobile:
+            raise HTTPException(
+                status_code=422,
+                detail="INCOMPLETE_PROFILE:mobile:Please add your mobile number before booking."
+            )
 
     # ── Duplicate booking check ────────────────────────────────────────────────
     # Rule: same customer + same SERVICE CATEGORY + same address + active booking → block.
