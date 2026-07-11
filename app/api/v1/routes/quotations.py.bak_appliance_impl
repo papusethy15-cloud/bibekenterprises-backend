@@ -382,19 +382,6 @@ async def get_quotation(
     data["booking_city"] = booking.address_city if booking and hasattr(booking, "address_city") else None
     data["booking_appliance_brand"] = booking.appliance_brand if booking else None
     data["booking_appliance_model"] = booking.appliance_model if booking else None
-    # ── service_category_id: used by frontends to filter appliances by category ──
-    _bkg_svc_cat_id = None
-    if booking and booking.service_id:
-        try:
-            from app.models.service import Service as _SvcModel
-            _bkg_svc = (await db.execute(
-                select(_SvcModel).where(_SvcModel.id == booking.service_id)
-            )).scalar_one_or_none()
-            if _bkg_svc:
-                _bkg_svc_cat_id = str(_bkg_svc.category_id) if _bkg_svc.category_id else None
-        except Exception:
-            pass
-    data["service_category_id"] = _bkg_svc_cat_id
     data["services"] = [
         {
             "id": str(item.id),
@@ -1544,77 +1531,6 @@ async def add_quotation_appliance(
             "rbid": str(repeat_booking_id) if repeat_booking_id else None,
         }
     )
-
-    # ── AUTO-ADD BOOKING SERVICE ────────────────────────────────────────────
-    # When the FIRST appliance is added to a quotation that has no service items
-    # yet, automatically add the booking's booked service as a service item
-    # under this appliance. This saves the technician/CCO/admin from having to
-    # manually re-add a service they already know from the booking.
-    # Category-smart: the service is pre-linked to the booking's service, which
-    # is already category-filtered (AC booking → AC service category).
-    try:
-        existing_service_count = (await db.execute(
-            sa_text("SELECT COUNT(*) FROM quotation_service_items WHERE quotation_id=:qid AND is_active=true"),
-            {"qid": str(quotation_id)}
-        )).scalar() or 0
-        existing_appliance_count = (await db.execute(
-            sa_text("SELECT COUNT(*) FROM quotation_appliances WHERE quotation_id=:qid AND is_active=true"),
-            {"qid": str(quotation_id)}
-        )).scalar() or 0
-        # Only auto-add if this is the first appliance AND there are no service items yet
-        if existing_appliance_count <= 1 and existing_service_count == 0:
-            booking_row = (await db.execute(
-                sa_text("""
-                    SELECT b.service_id, b.service_name, b.city_id
-                    FROM bookings b WHERE b.id = :bid
-                """),
-                {"bid": str(quotation.booking_id)}
-            )).mappings().first()
-            if booking_row and booking_row["service_id"]:
-                svc_row = (await db.execute(
-                    sa_text("SELECT id, name, base_price FROM services WHERE id=:sid AND is_active=true"),
-                    {"sid": str(booking_row["service_id"])}
-                )).mappings().first()
-                if svc_row:
-                    # Resolve city price if available
-                    unit_price = float(svc_row["base_price"] or 0)
-                    if booking_row["city_id"]:
-                        cp = (await db.execute(
-                            sa_text("""
-                                SELECT price FROM service_city_prices
-                                WHERE service_id=:sid AND city_id=:cid AND is_active=true LIMIT 1
-                            """),
-                            {"sid": str(svc_row["id"]), "cid": str(booking_row["city_id"])}
-                        )).scalar()
-                        if cp:
-                            unit_price = float(cp)
-                    encoded_name = f"{label} :: {svc_row['name']}"
-                    await db.execute(
-                        sa_text("""
-                            INSERT INTO quotation_service_items
-                              (id, quotation_id, service_id, service_name, quantity, unit_price, total_price,
-                               appliance_label, is_repeat_complaint, is_pending_verify, created_at, is_active)
-                            VALUES
-                              (gen_random_uuid(), :qid, :sid, :sname, 1, :price, :price,
-                               :lbl, false, 0, NOW(), true)
-                        """),
-                        {
-                            "qid": str(quotation_id),
-                            "sid": str(svc_row["id"]),
-                            "sname": encoded_name,
-                            "price": unit_price,
-                            "lbl": label,
-                        }
-                    )
-                    # Flush so the raw-SQL insert is visible to the ORM select inside _recalculate
-                    await db.flush()
-                    db.expire(quotation)  # force re-read of totals from DB
-                    await _recalculate_quotation(db, quotation)
-    except Exception as _auto_svc_err:
-        import logging as _log2
-        _log2.getLogger(__name__).warning("Auto-add booking service to quotation failed: %s", _auto_svc_err)
-        # Non-fatal — don't fail the whole appliance-add operation
-
     await db.commit()
     _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
 

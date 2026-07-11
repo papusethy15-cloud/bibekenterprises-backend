@@ -457,6 +457,65 @@ async def domain_catalogue(
 def _domain_mini(d) -> dict:
     return {"id": str(d.id), "name": d.name, "slug": d.slug, "primary_color": d.primary_color}
 
+# ── My appliances (customer self-service) ─────────────────────────────────
+@router.get("/me", summary="My appliances [Customer]")
+async def my_appliances(
+    current_user: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns all active appliances for the authenticated customer (used in booking step 3)."""
+    from app.models.appliance import CustomerAppliance
+    from app.models.customer import Customer
+    from uuid import UUID as _UUID
+
+    user_id = current_user.get("user_id")
+    cust = (await db.execute(
+        select(Customer).where(Customer.user_id == _UUID(user_id))
+    )).scalar_one_or_none()
+    if not cust:
+        return success_response(data=[])
+
+    items = (await db.execute(
+        select(CustomerAppliance)
+        .where(CustomerAppliance.customer_id == cust.id, CustomerAppliance.is_active == True)
+        .order_by(CustomerAppliance.created_at.desc())
+    )).scalars().all()
+    return success_response(data=[await _enrich(a, db) for a in items])
+
+
+@router.post("/me", summary="Add my appliance [Customer]")
+async def add_my_appliance(
+    payload: AddApplianceRequest,
+    current_user: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db)
+):
+    """Customer adds an appliance to their own account (used in booking step 3)."""
+    from app.models.appliance import CustomerAppliance
+    from app.models.customer import Customer
+    from uuid import UUID as _UUID
+
+    user_id = current_user.get("user_id")
+    cust = (await db.execute(
+        select(Customer).where(Customer.user_id == _UUID(user_id))
+    )).scalar_one_or_none()
+    if not cust:
+        raise HTTPException(403, "Only customers can use this endpoint")
+
+    a = CustomerAppliance(
+        customer_id           = cust.id,
+        brand_id              = _UUID(payload.brand_id)              if payload.brand_id              else None,
+        type_id               = _UUID(payload.type_id)               if payload.type_id               else None,
+        appliance_category_id = _UUID(payload.appliance_category_id) if payload.appliance_category_id else None,
+        category              = payload.category,
+        model                 = payload.model,
+        serial_number         = payload.serial_number,
+        notes                 = payload.notes,
+        image_url             = payload.image_url,
+    )
+    db.add(a); await db.commit()
+    return success_response(data=await _enrich(a, db), message="Appliance added")
+
+
 # ── By customer ────────────────────────────────────────────────────────────
 @router.get("/customer/{customer_id}", summary="Customer's appliances [Staff]")
 async def customer_appliances(

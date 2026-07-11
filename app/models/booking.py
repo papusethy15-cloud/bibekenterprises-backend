@@ -67,6 +67,7 @@ class Booking(BaseModel):
     notes            = Column(Text, nullable=True)
     appliance_brand  = Column(String(100), nullable=True)
     appliance_model  = Column(String(100), nullable=True)
+    appliance_id     = Column(UUID(as_uuid=True), ForeignKey('customer_appliances.id', ondelete='SET NULL'), nullable=True)
     base_amount      = Column(Float, default=0.0)
     discount_amount  = Column(Float, default=0.0)
     gst_amount       = Column(Float, default=0.0)

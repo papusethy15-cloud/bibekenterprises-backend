@@ -560,6 +560,7 @@ async def create_booking(
         notes=payload.notes,
         appliance_brand=payload.appliance_brand,
         appliance_model=payload.appliance_model,
+        appliance_id=UUID(payload.appliance_id) if getattr(payload, 'appliance_id', None) else None,
         source=BookingSource(payload.source),
         status=BookingStatus.CONFIRMED,
         priority=payload.priority or "NORMAL",

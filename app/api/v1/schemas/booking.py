@@ -15,6 +15,7 @@ class CreateBookingRequest(BaseModel):
     notes:           Optional[str] = None
     appliance_brand: Optional[str] = None
     appliance_model: Optional[str] = None
+    appliance_id:    Optional[str] = None  # FK to customer_appliances; links booking to a known device
     source:          str = "CALL_CENTER"
     priority:        Optional[str] = "NORMAL"
     domain_id:       Optional[str] = None
