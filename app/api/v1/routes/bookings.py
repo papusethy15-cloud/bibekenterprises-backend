@@ -595,6 +595,7 @@ async def create_booking(
         domain_id=UUID(payload.domain_id) if payload.domain_id else None,
         base_amount=base_price,
         discount_amount=coupon_discount,
+        gst_amount=round((service.gst_percent / 100.0) * final_total, 2) if service and service.gst_percent else 0.0,
         total_amount=final_total,
         coupon_id=coupon_id,
         coupon_code=coupon_code,
