@@ -19,27 +19,21 @@ depends_on = None
 
 
 def upgrade():
-    # Add appliance_id nullable FK column to bookings
-    op.add_column(
-        'bookings',
-        sa.Column(
-            'appliance_id',
-            postgresql.UUID(as_uuid=True),
-            nullable=True,
-        )
-    )
-    # FK constraint (separate so it can be applied even if table locks differ)
-    op.create_foreign_key(
-        'fk_bookings_appliance_id',
-        'bookings', 'customer_appliances',
-        ['appliance_id'], ['id'],
-        ondelete='SET NULL',
-    )
-    # Index for quick look-up of all bookings for a given appliance
-    op.create_index('ix_bookings_appliance_id', 'bookings', ['appliance_id'])
+    # Use op.execute(text(...)) — the only safe pattern under asyncpg run_sync.
+    # op.add_column() and op.get_bind() both cause DuplicateColumnError / abort
+    # when the column already exists (partial VPS run). IF NOT EXISTS guards make
+    # this migration 100% idempotent.
+    op.execute(sa.text("""
+        ALTER TABLE bookings
+            ADD COLUMN IF NOT EXISTS appliance_id UUID
+                REFERENCES customer_appliances(id) ON DELETE SET NULL
+    """))
+    op.execute(sa.text("""
+        CREATE INDEX IF NOT EXISTS ix_bookings_appliance_id
+            ON bookings (appliance_id)
+    """))
 
 
 def downgrade():
-    op.drop_index('ix_bookings_appliance_id', table_name='bookings')
-    op.drop_constraint('fk_bookings_appliance_id', 'bookings', type_='foreignkey')
-    op.drop_column('bookings', 'appliance_id')
+    op.execute(sa.text("DROP INDEX IF EXISTS ix_bookings_appliance_id"))
+    op.execute(sa.text("ALTER TABLE bookings DROP COLUMN IF EXISTS appliance_id"))
