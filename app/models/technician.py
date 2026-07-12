@@ -62,6 +62,14 @@ class Technician(BaseModel):
     # still be assigned manually by admin/CCO. Default True preserves old behaviour.
     auto_assign_eligible = Column(Boolean, default=True, nullable=False)
 
+    # ── Payout / payment method ────────────────────────────────────────────
+    payout_upi_id          = Column(String(200), nullable=True)
+    payout_bank_account    = Column(String(200), nullable=True)
+    payout_bank_ifsc       = Column(String(20),  nullable=True)
+    payout_bank_name       = Column(String(200), nullable=True)
+    payout_account_holder  = Column(String(200), nullable=True)
+    payout_method_verified = Column(Boolean, default=False, nullable=False)
+
 
 class TechnicianSkill(BaseModel):
     __tablename__ = "technician_skills"

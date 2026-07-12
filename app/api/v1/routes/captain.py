@@ -71,6 +71,14 @@ def _tech_profile(tech: Technician) -> dict:
         "last_lat":         tech.last_lat,
         "last_lng":         tech.last_lng,
         "last_seen_at":     tech.last_seen_at.isoformat() if tech.last_seen_at else None,
+        # Payout method
+        "payout_upi_id":          tech.payout_upi_id,
+        "payout_bank_account":    tech.payout_bank_account,
+        "payout_bank_ifsc":       tech.payout_bank_ifsc,
+        "payout_bank_name":       tech.payout_bank_name,
+        "payout_account_holder":  tech.payout_account_holder,
+        "payout_method_verified": tech.payout_method_verified if tech.payout_method_verified is not None else False,
+        "has_payout_method":      bool(tech.payout_upi_id or tech.payout_bank_account),
     }
 
 
@@ -96,6 +104,63 @@ async def captain_me(
 ):
     tech = await _get_technician_for_user(current_user["user_id"], db)
     return success_response(data=_tech_profile(tech))
+
+
+# ── Profile update ─────────────────────────────────────────────────────────
+class TechnicianProfileUpdate(BaseModel):
+    name:                  Optional[str] = None
+    email:                 Optional[str] = None
+    # Payout method
+    payout_upi_id:         Optional[str] = None
+    payout_bank_account:   Optional[str] = None
+    payout_bank_ifsc:      Optional[str] = None
+    payout_bank_name:      Optional[str] = None
+    payout_account_holder: Optional[str] = None
+
+
+@router.put("/me/profile", summary="Captain: update own profile [Technician]")
+async def captain_update_profile(
+    payload: TechnicianProfileUpdate,
+    current_user: dict = Depends(TechnicianOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    tech = await _get_technician_for_user(current_user["user_id"], db)
+    fields = payload.model_dump(exclude_unset=True)
+
+    # Validate payout fields
+    if "payout_bank_ifsc" in fields and fields["payout_bank_ifsc"]:
+        ifsc = fields["payout_bank_ifsc"].strip().upper()
+        if len(ifsc) != 11:
+            raise HTTPException(status_code=400, detail="IFSC code must be exactly 11 characters.")
+        fields["payout_bank_ifsc"] = ifsc
+
+    if "payout_upi_id" in fields and fields["payout_upi_id"]:
+        fields["payout_upi_id"] = fields["payout_upi_id"].strip()
+
+    # If switching method, clear the old one
+    if "payout_upi_id" in fields and fields["payout_upi_id"]:
+        # UPI set → clear bank fields unless bank also provided
+        if "payout_bank_account" not in fields:
+            tech.payout_bank_account = None
+            tech.payout_bank_ifsc    = None
+            tech.payout_bank_name    = None
+            tech.payout_account_holder = None
+    elif "payout_bank_account" in fields and fields["payout_bank_account"]:
+        # Bank set → clear UPI unless UPI also provided
+        if "payout_upi_id" not in fields:
+            tech.payout_upi_id = None
+
+    # Updating payout details resets admin verification
+    payout_fields = {"payout_upi_id","payout_bank_account","payout_bank_ifsc","payout_bank_name","payout_account_holder"}
+    if any(k in fields for k in payout_fields):
+        tech.payout_method_verified = False
+
+    for k, v in fields.items():
+        setattr(tech, k, v)
+
+    await db.commit()
+    await db.refresh(tech)
+    return success_response(data=_tech_profile(tech), message="Profile updated.")
 
 
 @router.put("/me/status", summary="Captain: go online / offline [Technician]")
@@ -981,6 +1046,25 @@ async def captain_request_withdrawal(
     wallet = (await db.execute(select(Wallet).where(Wallet.technician_id == tech.id))).scalar_one_or_none()
     if not wallet:
         raise HTTPException(status_code=400, detail="No wallet found. You have no balance to withdraw.")
+
+    # ── Require at minimum one saved payout method on the technician profile ──
+    # (overrideable at request time if they supply UPI/bank in the payload)
+    payload_has_payment = bool(payload.upi_id or payload.bank_account)
+    profile_has_payment = bool(tech.payout_upi_id or tech.payout_bank_account)
+    if not payload_has_payment and not profile_has_payment:
+        raise HTTPException(
+            status_code=400,
+            detail="No payment method on file. Please add a UPI ID or bank account in your profile before requesting a withdrawal."
+        )
+
+    # Auto-fill from profile if not provided in this request
+    if not payload_has_payment and profile_has_payment:
+        if tech.payout_upi_id:
+            payload.upi_id = tech.payout_upi_id
+        elif tech.payout_bank_account:
+            payload.bank_account    = tech.payout_bank_account
+            payload.bank_ifsc       = tech.payout_bank_ifsc
+            payload.bank_name       = tech.payout_bank_name
 
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0.")

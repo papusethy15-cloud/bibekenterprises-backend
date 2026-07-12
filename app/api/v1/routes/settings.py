@@ -63,11 +63,17 @@ GENERAL_KEYS = [
 ]
 
 PAYMENT_KEYS = [
-    ("razorpay_key_id",     "Razorpay Key ID",     False),
-    ("razorpay_key_secret", "Razorpay Key Secret", True),
-    ("payment_gateway",     "Payment Gateway",     False),
-    ("upi_enabled",         "UPI Enabled",         False),
-    ("cash_enabled",        "Cash Enabled",        False),
+    ("razorpay_key_id",           "Razorpay Key ID",              False),
+    ("razorpay_key_secret",       "Razorpay Key Secret",          True),
+    ("payment_gateway",           "Payment Gateway",              False),
+    ("upi_enabled",               "UPI Enabled",                  False),
+    ("cash_enabled",              "Cash Enabled",                 False),
+    # RazorpayX payout (technician withdrawal automation)
+    ("razorpay_payout_enabled",   "Razorpay Payout Enabled",      False),
+    ("razorpay_x_key_id",         "RazorpayX Key ID",             False),
+    ("razorpay_x_key_secret",     "RazorpayX Key Secret",         True),
+    ("razorpay_x_account_number", "RazorpayX Account Number",     False),
+    ("withdrawal_payout_mode",    "Withdrawal Payout Mode",       False),
 ]
 
 NOTIFICATION_KEYS = [
@@ -133,6 +139,8 @@ GROUP_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "payment": {
         "razorpay_key_id": "", "razorpay_key_secret": "",
         "payment_gateway": "razorpay", "upi_enabled": "true", "cash_enabled": "true",
+        "razorpay_payout_enabled": "false", "razorpay_x_key_id": "", "razorpay_x_key_secret": "",
+        "razorpay_x_account_number": "", "withdrawal_payout_mode": "manual",
     },
     "notification": {
         "sms_api_key": "", "sms_sender_id": "", "whatsapp_api_key": "",

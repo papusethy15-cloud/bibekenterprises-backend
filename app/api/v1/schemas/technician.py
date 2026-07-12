@@ -24,6 +24,13 @@ class CreateTechnicianRequest(BaseModel):
     identity_number: Optional[str] = None
     pincode: Optional[str] = None
 
+    # Payout / payment method
+    payout_upi_id:         Optional[str] = None
+    payout_bank_account:   Optional[str] = None
+    payout_bank_ifsc:      Optional[str] = None
+    payout_bank_name:      Optional[str] = None
+    payout_account_holder: Optional[str] = None
+
     # Skills to add at creation time
     skills: Optional[List[dict]] = None  # [{ service_id, proficiency }]
 
@@ -66,6 +73,13 @@ class UpdateTechnicianRequest(BaseModel):
     identity_type: Optional[str] = None
     identity_number: Optional[str] = None
     status: Optional[str] = None
+    # Payout / payment method
+    payout_upi_id:         Optional[str] = None
+    payout_bank_account:   Optional[str] = None
+    payout_bank_ifsc:      Optional[str] = None
+    payout_bank_name:      Optional[str] = None
+    payout_account_holder: Optional[str] = None
+    payout_method_verified: Optional[bool] = None
     # When False, technician is skipped by the auto-assign engine entirely
     # (still assignable manually by admin/CCO). Admin-only toggle.
     auto_assign_eligible: Optional[bool] = None

@@ -479,6 +479,13 @@ def _serialize(t: Technician, full: bool = False) -> dict:
             "id_proof": t.id_proof,
             "emergency_contact_name": t.emergency_contact_name,
             "emergency_contact_mobile": t.emergency_contact_mobile,
+            "payout_upi_id":          t.payout_upi_id,
+            "payout_bank_account":    t.payout_bank_account,
+            "payout_bank_ifsc":       t.payout_bank_ifsc,
+            "payout_bank_name":       t.payout_bank_name,
+            "payout_account_holder":  t.payout_account_holder,
+            "payout_method_verified": t.payout_method_verified if t.payout_method_verified is not None else False,
+            "has_payout_method":      bool(t.payout_upi_id or t.payout_bank_account),
             "created_at": t.created_at.isoformat() if hasattr(t, 'created_at') and t.created_at else None,
         })
     return base
