@@ -29,8 +29,8 @@ class PatchEscalationRequest(BaseModel):
     assigned_to: Optional[str] = None
 
 
-def _esc_dict(e) -> dict:
-    """Serialize escalation to a full dict for CCO consumption."""
+def _esc_dict(e, booking=None, customer=None) -> dict:
+    """Serialize escalation to a full dict for Admin/CCO consumption."""
     return {
         "id": str(e.id),
         "subject": e.subject,
@@ -41,6 +41,13 @@ def _esc_dict(e) -> dict:
         "escalation_notes": getattr(e, "escalation_notes", None),
         "escalation_level": getattr(e, "escalation_level", 1) or 1,
         "booking_id": str(e.booking_id) if e.booking_id else None,
+        "booking_number": booking.booking_number if booking else None,
+        "customer_name": (
+            getattr(customer, "name", None) or
+            f"{getattr(customer, 'first_name', '') or ''} {getattr(customer, 'last_name', '') or ''}".strip()
+            if customer else None
+        ),
+        "customer_mobile": getattr(customer, "mobile", None) or getattr(customer, "mobile_number", None) if customer else None,
         "assigned_to": str(e.assigned_to) if e.assigned_to else None,
         "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
         "created_at": e.created_at.isoformat(),
@@ -81,6 +88,8 @@ async def list_escalations(
     db: AsyncSession = Depends(get_db),
 ):
     from app.models.escalation import Escalation, EscalationStatus
+    from app.models.booking import Booking
+    from app.models.customer import Customer
     effective_limit = limit if limit is not None else per_page
     q = select(Escalation).where(Escalation.is_active == True)
     if status:
@@ -95,7 +104,18 @@ async def list_escalations(
         .offset((page - 1) * effective_limit)
         .limit(effective_limit)
     )).scalars().all()
-    return success_response(data={"items": [_esc_dict(e) for e in items], "total": total})
+
+    # Enrich with booking number + customer info
+    result = []
+    for e in items:
+        booking = None
+        customer = None
+        if e.booking_id:
+            booking = (await db.execute(select(Booking).where(Booking.id == e.booking_id))).scalar_one_or_none()
+            if booking and booking.customer_id:
+                customer = (await db.execute(select(Customer).where(Customer.id == booking.customer_id))).scalar_one_or_none()
+        result.append(_esc_dict(e, booking, customer))
+    return success_response(data={"items": result, "total": total})
 
 
 @router.get("/history", summary="Escalation history [Admin/CCO]")

@@ -1926,45 +1926,129 @@ _pdf_logger = _logging.getLogger(__name__)
 
 
 def _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts) -> bytes:
-    """Builds a professional quotation PDF using ReportLab platypus."""
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=15 * mm,
-        leftMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=20 * mm,
-        title=f"Quotation {quotation.quotation_number}",
-    )
+    """
+    Professional Quotation PDF — matches the invoice PDF visual style.
 
-    styles = getSampleStyleSheet()
-    brand_color = rl_colors.HexColor("#1D4ED8")
-    orange_color = rl_colors.HexColor("#F97316")
-    ink_dark = rl_colors.HexColor("#111827")
-    ink_mid = rl_colors.HexColor("#6B7280")
-    ink_light = rl_colors.HexColor("#F3F4F6")
+    Layout (A4):
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  [LOGO/MONO]  Business Name (navy, large)    QUOTATION          │
+    │               Tagline, Address, Contact      QT-XXXXXXXXXXXX    │
+    │               GSTIN, PAN                     DD Mon YYYY        │
+    │                                              [Pending Approval]  │
+    ├─────────────────────────────────────────────────────────────────┤
+    │  BILL TO                    │  BOOKING DETAILS                  │
+    │  Customer Name (bold)       │  Booking No.  #BK-XXXXXX         │
+    │  Phone                      │  Service      AC Gas Charging     │
+    │  Address                    │  Scheduled    06 Jul 2026         │
+    ├─────────────────────────────────────────────────────────────────┤
+    │  #  │ Description     │ Type    │ Qty │ Unit Price │ Amount     │
+    │  1  │ Gas Charging    │ Service │  1  │    ₹850    │    ₹850    │
+    │  2  │ R22 Refrigerant │ Part    │  1  │    ₹650    │    ₹650    │
+    ├─────────────────────────────────────────────────────────────────┤
+    │                              │  Discount      - ₹XXX           │
+    │  Amount in Words (italic)    │  Tax (18%)       ₹XXX           │
+    │                              │  ─────────────────────           │
+    │                              │  TOTAL AMOUNT    ₹X,XXX          │
+    ├─────────────────────────────────────────────────────────────────┤
+    │  Notes / Remarks (if any)                                        │
+    ├─────────────────────────────────────────────────────────────────┤
+    │  Terms: Valid 7 days · Prices are estimates · No physical sig.   │
+    │  (c) 2026 BusinessName · Generated automatically                 │
+    └─────────────────────────────────────────────────────────────────┘
+    """
+    from io import BytesIO as _BIO2
+    from reportlab.lib import colors as rlc
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.lib.units import mm as _mm
+    from reportlab.lib.styles import getSampleStyleSheet as _gss, ParagraphStyle as _PS
+    from reportlab.lib.enums import TA_RIGHT as _TAR, TA_CENTER as _TAC, TA_LEFT as _TAL
+    from reportlab.platypus import (SimpleDocTemplate as _SDT, Table as _T, TableStyle as _TS,
+                                     Paragraph as _P, Spacer as _Sp, HRFlowable as _HR,
+                                     Image as _Img, KeepTogether as _KT)
+    import datetime as _dt
 
-    h1 = ParagraphStyle("h1", fontSize=18, fontName="Helvetica-Bold", textColor=brand_color, leading=22)
-    h2 = ParagraphStyle("h2", fontSize=12, fontName="Helvetica-Bold", textColor=ink_dark, leading=16)
-    normal = ParagraphStyle("normal", fontSize=9, fontName="Helvetica", textColor=ink_dark, leading=14)
-    small = ParagraphStyle("small", fontSize=8, fontName="Helvetica", textColor=ink_mid, leading=12)
-    right = ParagraphStyle("right", fontSize=9, fontName="Helvetica", textColor=ink_dark, leading=14, alignment=TA_RIGHT)
-    bold = ParagraphStyle("bold", fontSize=9, fontName="Helvetica-Bold", textColor=ink_dark, leading=14)
-    total_style = ParagraphStyle("total", fontSize=11, fontName="Helvetica-Bold", textColor=brand_color, leading=16, alignment=TA_RIGHT)
+    # ── Palette (matches invoice) ─────────────────────────────────────────────
+    NAVY    = rlc.HexColor("#1E3A8A")
+    BLUE    = rlc.HexColor("#2563EB")
+    BLUE_LT = rlc.HexColor("#DBEAFE")
+    ORANGE  = rlc.HexColor("#EA580C")
+    AMBER   = rlc.HexColor("#D97706")
+    GREEN   = rlc.HexColor("#16A34A")
+    GREY_DK = rlc.HexColor("#111827")
+    GREY_MD = rlc.HexColor("#6B7280")
+    GREY_LT = rlc.HexColor("#F9FAFB")
+    WHITE   = rlc.white
+    DIVIDER = rlc.HexColor("#E2E8F0")
 
-    domain_name = domain_profile.get("business_name") if domain_profile else "Bibek Enterprises"
-    domain_address = domain_profile.get("address", "") if domain_profile else ""
-    domain_gstin = domain_profile.get("gstin", "") if domain_profile else ""
-    domain_phone = domain_profile.get("support_phone", "") if domain_profile else ""
-    domain_email = domain_profile.get("support_email", "") if domain_profile else ""
-    domain_logo_url = domain_profile.get("logo_url", "") if domain_profile else ""
+    W = 178 * _mm   # usable page width (A4 - 16mm margins each side)
 
-    cust_name = f"{customer.first_name or ''} {customer.last_name or ''}".strip() or "Customer"
-    cust_mobile = customer.mobile_number or ""
+    base = _gss()["Normal"]
+    def S(name, size=9, color=GREY_DK, bold=False, italic=False, align=0, leading=None, sb=0, sa=0):
+        fn = ("Helvetica-BoldOblique" if (bold and italic) else
+              "Helvetica-Bold"  if bold   else
+              "Helvetica-Oblique" if italic else "Helvetica")
+        return _PS(name, parent=base, fontSize=size, textColor=color, fontName=fn,
+                   alignment=align, leading=leading or round(size * 1.4),
+                   spaceBefore=sb, spaceAfter=sa)
 
-    booking_no = booking.booking_number if booking else "—"
-    service_name = booking.service_name if hasattr(booking, "service_name") and booking.service_name else "Service"
+    sH_biz  = S("QHBiz",  17, NAVY,    bold=True)
+    sH_tag  = S("QHTag",   9, GREY_MD, italic=True)
+    sH_addr = S("QHAddr",  8, GREY_MD)
+    sH_gst  = S("QHGST",   8, GREY_MD)
+    sB_tit  = S("QBTit",  12, WHITE,   bold=True,  align=2)
+    sB_num  = S("QBNum",   8, rlc.HexColor("#FED7AA"), align=2)
+    sB_dat  = S("QBDat",   8, rlc.HexColor("#FDBA74"), align=2)
+    sB_sta  = S("QBSta",   9, WHITE,   bold=True,  align=2)
+    sS_lbl  = S("QSLbl",   7, GREY_MD, bold=True)
+    sS_val  = S("QSVal",   9, GREY_DK, bold=True)
+    sS_sub  = S("QSSub",   8, GREY_MD)
+    sTH     = S("QTH",     9, WHITE,   bold=True)
+    sTD     = S("QTD",     9, GREY_DK)
+    sTDr    = S("QTDr",    9, GREY_DK, align=2)
+    sTDbr   = S("QTDbr",   9, GREY_DK, bold=True, align=2)
+    sTLbl   = S("QTLbl",   9, GREY_MD)
+    sTVal   = S("QTVal",   9, GREY_DK, bold=True, align=2)
+    sTGLbl  = S("QTGLbl", 10, NAVY,    bold=True)
+    sTGVal  = S("QTGVal", 10, ORANGE,  bold=True, align=2)
+    sWords  = S("QWords",  7, GREY_MD, italic=True, align=2)
+    sNote   = S("QNote",   8, GREY_MD)
+    sFooter = S("QFoot",   8, GREY_MD, align=1)
+    sFooter2= S("QFoot2",  7, rlc.HexColor("#9CA3AF"), align=1)
+
+    # ── Collect business info ─────────────────────────────────────────────────
+    dp = domain_profile  # dict or None
+    biz_name  = (dp.get("business_name") or dp.get("business_legal_name") if dp else None) or "Bibek Enterprises"
+    tagline   = dp.get("tagline")            if dp else None
+    logo_url  = dp.get("logo_url")           if dp else None
+    gstin     = dp.get("gstin")              if dp else None
+    pan       = dp.get("pan_number")         if dp else None
+    phone     = dp.get("support_phone")      if dp else None
+    email_str = dp.get("support_email")      if dp else None
+    addr_raw  = dp.get("address") or dp.get("office_address") or "" if dp else ""
+    copyright_txt = dp.get("copyright_text") if dp else None
+    copyright_txt = copyright_txt or f"(c) {_dt.datetime.utcnow().year} {biz_name}. All rights reserved."
+
+    cust_name   = (getattr(customer, "name", None) or
+                   f"{getattr(customer, 'first_name', '') or ''} {getattr(customer, 'last_name', '') or ''}".strip() or
+                   "Customer")
+    cust_mobile = getattr(customer, "mobile", None) or getattr(customer, "mobile_number", None) or ""
+    booking_no  = booking.booking_number if booking else "—"
+    service_nm  = (booking.service_name  if (booking and hasattr(booking, "service_name") and booking.service_name) else "Service")
+    sched_str   = ""
+    try:
+        if booking and booking.scheduled_date:
+            _sd = booking.scheduled_date
+            sched_str = _sd.strftime("%-d %b %Y") if hasattr(_sd, "strftime") else str(_sd)[:10]
+    except Exception:
+        pass
+
+    created_str = ""
+    try:
+        if quotation.created_at:
+            _cd = quotation.created_at
+            created_str = _cd.strftime("%-d %b %Y") if hasattr(_cd, "strftime") else str(_cd)[:10]
+    except Exception:
+        created_str = ""
 
     status_label = {
         "DRAFT": "Draft",
@@ -1974,229 +2058,259 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
         "REVISED": "Revised",
         "CONVERTED_TO_INVOICE": "Converted to Invoice",
         "EXPIRED": "Expired",
-    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), "Unknown")
+    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), "Pending Approval")
 
-    story = []
+    badge_color = {
+        "APPROVED": rlc.HexColor("#059669"),
+        "REJECTED": rlc.HexColor("#DC2626"),
+        "CONVERTED_TO_INVOICE": rlc.HexColor("#7C3AED"),
+        "EXPIRED": rlc.HexColor("#6B7280"),
+    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), ORANGE)
 
-    # ── Header: logo (if available) + company name / QUOTATION label ──────
-    # Try to fetch the logo and embed it; fall back to text-only if unavailable.
-    logo_image = None
-    if domain_logo_url:
+    # ── Document ──────────────────────────────────────────────────────────────
+    buf = _BIO2()
+    doc = _SDT(buf, pagesize=_A4, topMargin=14*_mm, bottomMargin=14*_mm,
+               leftMargin=16*_mm, rightMargin=16*_mm,
+               title=f"Quotation {quotation.quotation_number}")
+    els = []
+
+    # ═══ 1. HEADER ═══════════════════════════════════════════════════════════
+    # Logo / monogram
+    logo_cell = None
+    if logo_url:
         try:
-            import urllib.request as _urlreq
-            import tempfile as _tmp
-            import os as _os
-            from reportlab.platypus import Image as RLImage
-            with _urlreq.urlopen(domain_logo_url, timeout=4) as _resp:
-                _logo_data = _resp.read()
-            _suffix = ".png" if "png" in domain_logo_url.lower() else ".jpg"
-            _tmp_file = _tmp.NamedTemporaryFile(delete=False, suffix=_suffix)
-            _tmp_file.write(_logo_data)
-            _tmp_file.close()
-            logo_image = RLImage(_tmp_file.name, width=36 * mm, height=18 * mm, kind="proportional")
+            import requests as _req
+            r = _req.get(logo_url, timeout=5)
+            if r.status_code == 200:
+                from io import BytesIO as _LB
+                logo_cell = _Img(_LB(r.content), width=28*_mm, height=28*_mm)
         except Exception:
-            logo_image = None
+            logo_cell = None
+    if logo_cell is None:
+        initials = "".join(w[0].upper() for w in biz_name.split()[:2])
+        mono_p = _P(f"<b>{initials}</b>", S("QMono", 16, WHITE, bold=True, align=1))
+        mono_t = _T([[mono_p]], colWidths=[28*_mm], rowHeights=[28*_mm])
+        mono_t.setStyle(_TS([
+            ("BACKGROUND", (0,0),(-1,-1), NAVY),
+            ("VALIGN",     (0,0),(-1,-1), "MIDDLE"),
+            ("ALIGN",      (0,0),(-1,-1), "CENTER"),
+            ("ROUNDEDCORNERS", [4]),
+        ]))
+        logo_cell = mono_t
 
-    # Build company info block (name + address + contact)
-    company_lines = [f"<b>{domain_name or 'Bibek Enterprises'}</b>"]
-    if domain_address:
-        company_lines.append(domain_address)
-    contact_parts = []
-    if domain_phone:
-        contact_parts.append(f"📞 {domain_phone}")
-    if domain_email:
-        contact_parts.append(f"✉ {domain_email}")
-    if contact_parts:
-        company_lines.append("  |  ".join(contact_parts))
-    if domain_gstin:
-        company_lines.append(f"GSTIN: {domain_gstin}")
+    # Business info column
+    biz_col = [_P(biz_name, sH_biz)]
+    if tagline:
+        biz_col.append(_P(tagline, sH_tag))
+    if addr_raw:
+        biz_col.append(_P(addr_raw, sH_addr))
+    contact = "  |  ".join(filter(None, [phone, email_str]))
+    if contact:
+        biz_col.append(_P(contact, sH_addr))
+    gst_str = "  |  ".join(filter(None, [f"GSTIN: {gstin}" if gstin else None, f"PAN: {pan}" if pan else None]))
+    if gst_str:
+        biz_col.append(_P(gst_str, sH_gst))
 
-    company_para = Paragraph("<br/>".join(company_lines), ParagraphStyle(
-        "company", fontSize=9, fontName="Helvetica", textColor=ink_dark, leading=14,
-    ))
-    company_name_para = Paragraph(domain_name or "Bibek Enterprises", h1)
-
-    quotation_label_para = Paragraph(
-        f"QUOTATION<br/><font size=9 color='#6B7280'>{quotation.quotation_number}</font>",
-        ParagraphStyle("qno", fontSize=18, fontName="Helvetica-Bold", textColor=orange_color, alignment=TA_RIGHT, leading=22),
-    )
-
-    if logo_image:
-        header_data = [[logo_image, company_para, quotation_label_para]]
-        header_table = Table(header_data, colWidths=["20%", "50%", "30%"])
-    else:
-        header_data = [[company_name_para, quotation_label_para]]
-        header_table = Table(header_data, colWidths=["60%", "40%"])
-
-    header_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story.append(header_table)
-
-    # Sub-header: address/contact lines if no logo (logo layout already includes them)
-    if not logo_image:
-        if domain_address:
-            story.append(Paragraph(domain_address, small))
-        contact_str = "  |  ".join(filter(None, [domain_phone, domain_email]))
-        if contact_str:
-            story.append(Paragraph(contact_str, small))
-        if domain_gstin:
-            story.append(Paragraph(f"GSTIN: {domain_gstin}", small))
-
-    story.append(HRFlowable(width="100%", thickness=1, color=rl_colors.HexColor("#E5E7EB"), spaceAfter=8))
-
-    # Info row
-    created_str = ""
-    try:
-        import datetime as _dt
-        if quotation.created_at:
-            dt = quotation.created_at if hasattr(quotation.created_at, "strftime") else _dt.datetime.fromisoformat(str(quotation.created_at))
-            created_str = dt.strftime("%-d %b %Y")
-    except Exception:
-        created_str = str(quotation.created_at or "")
-
-    # Build address line for "Bill To"
-    _addr_str = ""
-    try:
-        if booking and hasattr(booking, "address") and booking.address:
-            _addr_str = str(booking.address)
-    except Exception:
-        pass
-
-    # Scheduled date for booking info cell
-    _sched_str = ""
-    try:
-        if booking and hasattr(booking, "scheduled_date") and booking.scheduled_date:
-            import datetime as _dt2
-            _sdt = booking.scheduled_date
-            if hasattr(_sdt, "strftime"):
-                _sched_str = _sdt.strftime("%-d %b %Y")
-            else:
-                _sched_str = str(_sdt)[:10]
-    except Exception:
-        pass
-
-    bill_to_lines = [f"<b>Bill To</b>", cust_name, cust_mobile]
-    if _addr_str:
-        bill_to_lines.append(_addr_str[:80])  # truncate very long addresses
-
-    booking_lines = [f"<b>Booking No.</b>", f"#{booking_no}", service_name]
-    if _sched_str:
-        booking_lines.append(f"Scheduled: {_sched_str}")
-
-    info_data = [
-        [
-            Paragraph("<br/>".join(bill_to_lines), normal),
-            Paragraph("<br/>".join(booking_lines), normal),
-            Paragraph(f"<b>Date</b><br/>{created_str}<br/><b>Status:</b> {status_label}", normal),
-        ]
+    # Badge column (right-aligned, coloured background)
+    badge_col = [
+        _P("<b>QUOTATION</b>", sB_tit),
+        _P(f"{quotation.quotation_number}", sB_num),
+        _P(f"Date: {created_str}", sB_dat),
+        _P(f"<b>{status_label}</b>", sB_sta),
     ]
-    info_table = Table(info_data, colWidths=["33%", "33%", "34%"])
-    info_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BACKGROUND", (0, 0), (-1, -1), ink_light),
-        ("ROUNDEDCORNERS", [5]),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#E5E7EB")),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    badge_t = _T([[_P(b.text if hasattr(b, "text") else "", sB_sta)] if False else [b] for b in badge_col],
+                  colWidths=[46*_mm])
+    badge_t.setStyle(_TS([
+        ("BACKGROUND",    (0,0),(-1,-1), badge_color),
+        ("ROUNDEDCORNERS",[6]),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
     ]))
-    story.append(info_table)
-    story.append(Spacer(1, 10))
 
-    # Line items table
-    item_header = ["#", "Description", "Qty", "Unit Price", "Total"]
-    item_rows = [item_header]
+    header_t = _T([[logo_cell, biz_col, badge_t]], colWidths=[32*_mm, 100*_mm, 46*_mm])
+    header_t.setStyle(_TS([
+        ("VALIGN",         (0,0),(-1,-1), "TOP"),
+        ("RIGHTPADDING",   (1,0),(1,0),   12),
+        ("LEFTPADDING",    (0,0),(0,0),    0),
+        ("BOTTOMPADDING",  (0,0),(-1,-1),  4),
+    ]))
+    els.append(header_t)
+    els.append(_Sp(1, 6))
+    els.append(_HR(width="100%", thickness=1.5, color=NAVY, spaceAfter=10))
+
+    # ═══ 2. BILL TO / BOOKING DETAILS ROW ════════════════════════════════════
+    # Address string from booking
+    addr_str_bk = ""
+    try:
+        if booking:
+            for field in ("address_line", "address", "address_str"):
+                v = getattr(booking, field, None)
+                if v:
+                    addr_str_bk = str(v)[:80]
+                    break
+    except Exception:
+        pass
+
+    def _info_cell(label, *lines):
+        parts = [_P(f"<b>{label}</b>", S(f"_lbl{label}", 7, GREY_MD, bold=True))]
+        for line in lines:
+            if line:
+                parts.append(_P(str(line), S(f"_v{label}", 9, GREY_DK)))
+        return parts
+
+    bill_col = _info_cell("BILL TO", cust_name, cust_mobile, addr_str_bk or None)
+    book_col = _info_cell("BOOKING DETAILS",
+                          f"Booking No:  #{booking_no}",
+                          f"Service:  {service_nm}",
+                          f"Scheduled:  {sched_str}" if sched_str else None)
+
+    info_t = _T([[bill_col, book_col]], colWidths=[W * 0.5, W * 0.5])
+    info_t.setStyle(_TS([
+        ("BACKGROUND",    (0,0),(-1,-1), GREY_LT),
+        ("VALIGN",        (0,0),(-1,-1), "TOP"),
+        ("TOPPADDING",    (0,0),(-1,-1), 10),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+        ("LEFTPADDING",   (0,0),(-1,-1), 12),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 12),
+        ("LINEAFTER",     (0,0),(0,-1),  0.5, DIVIDER),
+        ("ROUNDEDCORNERS",[4]),
+    ]))
+    els.append(_KT([info_t, _Sp(1, 10)]))
+
+    # ═══ 3. LINE ITEMS TABLE ══════════════════════════════════════════════════
+    col_w = [7*_mm, None, 20*_mm, 18*_mm, 28*_mm, 28*_mm]
+
+    def _th(txt): return _P(f"<b>{txt}</b>", sTH)
+    rows = [[_th("#"), _th("Description"), _th("Type"), _th("Qty"), _th("Unit Price"), _th("Amount")]]
     idx = 1
     for s in services:
-        item_rows.append([
-            str(idx),
-            s.service_name or s.custom_service_name or "—",
-            str(s.quantity),
-            f"\u20b9{s.unit_price:.0f}",
-            f"\u20b9{s.total_price:.0f}",
+        rows.append([
+            _P(str(idx), sTD),
+            _P(s.service_name or getattr(s, "custom_service_name", None) or "—", sTD),
+            _P("Service", sTD),
+            _P(str(s.quantity), _P(str(s.quantity), sTD).__class__("_", 9, GREY_DK, align=1) if False else sTDr),
+            _P(f"₹{s.unit_price:.0f}", sTDr),
+            _P(f"₹{s.total_price:.0f}", sTDr),
         ])
         idx += 1
     for p in parts:
-        item_rows.append([
-            str(idx),
-            f"{p.part_name} (Part)",
-            str(p.quantity),
-            f"\u20b9{p.unit_price:.0f}",
-            f"\u20b9{p.total_price:.0f}",
+        rows.append([
+            _P(str(idx), sTD),
+            _P(getattr(p, "part_name", "Part"), sTD),
+            _P("Part", sTD),
+            _P(str(p.quantity), sTDr),
+            _P(f"₹{p.unit_price:.0f}", sTDr),
+            _P(f"₹{p.total_price:.0f}", sTDr),
         ])
         idx += 1
 
-    col_widths = [8 * mm, None, 15 * mm, 30 * mm, 30 * mm]
-    items_table = Table(item_rows, colWidths=col_widths, repeatRows=1)
-    items_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), brand_color),
-        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),
-        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-        ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#F9FAFB")]),
-        ("FONTSIZE", (0, 1), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#E5E7EB")),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    items_t = _T(rows, colWidths=col_w, repeatRows=1)
+    items_t.setStyle(_TS([
+        ("BACKGROUND",    (0,0),(-1,0),  BLUE),
+        ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
+        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0),(-1,0),  9),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, GREY_LT]),
+        ("FONTSIZE",      (0,1),(-1,-1), 9),
+        ("ALIGN",         (0,0),(0,-1),  "CENTER"),
+        ("ALIGN",         (3,0),(-1,-1), "RIGHT"),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ("GRID",          (0,0),(-1,-1), 0.4, DIVIDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 6),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+        ("LEFTPADDING",   (0,0),(-1,-1), 5),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 5),
     ]))
-    story.append(items_table)
-    story.append(Spacer(1, 8))
+    els.append(items_t)
+    els.append(_Sp(1, 8))
 
-    # Totals
-    totals_data = []
-    if float(quotation.discount_amount or 0) > 0:
-        totals_data.append(["Discount:", f"-\u20b9{float(quotation.discount_amount):.0f}"])
-    if float(quotation.adjustment_amount or 0) != 0:
-        totals_data.append(["Adjustment:", f"\u20b9{float(quotation.adjustment_amount):.0f}"])
-    totals_data.append([f"Tax ({float(quotation.tax_percent or 0):.0f}%):", f"\u20b9{float(quotation.tax_amount or 0):.0f}"])
-    totals_data.append(["TOTAL AMOUNT:", f"\u20b9{float(quotation.total_amount or 0):.0f}"])
+    # ═══ 4. TOTALS ════════════════════════════════════════════════════════════
+    # Amount in words (right side totals + left side words)
+    subtotal = float(getattr(quotation, "subtotal_amount", 0) or 0)
+    disc     = float(quotation.discount_amount or 0)
+    adj      = float(getattr(quotation, "adjustment_amount", 0) or 0)
+    tax_pct  = float(quotation.tax_percent or 0)
+    tax_amt  = float(quotation.tax_amount or 0)
+    total    = float(quotation.total_amount or 0)
 
-    totals_table = Table(
-        [[Paragraph(r[0], right if i < len(totals_data) - 1 else ParagraphStyle("tl", fontSize=11, fontName="Helvetica-Bold", alignment=TA_RIGHT, textColor=ink_dark)),
-          Paragraph(r[1], right if i < len(totals_data) - 1 else total_style)]
-         for i, r in enumerate(totals_data)],
-        colWidths=["75%", "25%"],
-    )
-    totals_table.setStyle(TableStyle([
-        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LINEABOVE", (0, -1), (-1, -1), 1, brand_color),
+    def _num_to_words(n):
+        """Simple integer-to-words for Indian rupees (up to crores)."""
+        try:
+            n = int(round(n))
+            if n == 0: return "Zero"
+            ones = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine",
+                    "Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen",
+                    "Seventeen","Eighteen","Nineteen"]
+            tens_w = ["","","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"]
+            def _h(num):
+                if num < 20: return ones[num]
+                if num < 100: return tens_w[num//10] + (" " + ones[num%10] if num%10 else "")
+                return ones[num//100] + " Hundred" + (" " + _h(num%100) if num%100 else "")
+            parts_w = []
+            if n >= 10000000:
+                parts_w.append(_h(n // 10000000) + " Crore"); n %= 10000000
+            if n >= 100000:
+                parts_w.append(_h(n // 100000) + " Lakh"); n %= 100000
+            if n >= 1000:
+                parts_w.append(_h(n // 1000) + " Thousand"); n %= 1000
+            if n > 0:
+                parts_w.append(_h(n))
+            return " ".join(parts_w)
+        except Exception:
+            return ""
+
+    words_str = _num_to_words(total)
+    words_p = _P(f"<i>Indian Rupees {words_str} Only</i>", sWords)
+
+    totals_rows = []
+    if subtotal > 0 and (disc > 0 or adj != 0):
+        totals_rows.append([_P("Subtotal:", sTLbl), _P(f"₹{subtotal:.0f}", sTVal)])
+    if disc > 0:
+        totals_rows.append([_P("Discount:", sTLbl), _P(f"- ₹{disc:.0f}", S("_disc", 9, rlc.HexColor("#DC2626"), align=2))])
+    if adj != 0:
+        totals_rows.append([_P("Adjustment:", sTLbl), _P(f"₹{adj:.0f}", sTVal)])
+    if tax_amt > 0:
+        totals_rows.append([_P(f"Tax ({tax_pct:.0f}%):", sTLbl), _P(f"₹{tax_amt:.0f}", sTVal)])
+    totals_rows.append([_P("<b>TOTAL AMOUNT:</b>", sTGLbl), _P(f"<b>₹{total:.0f}</b>", sTGVal)])
+
+    totals_t = _T(totals_rows, colWidths=[W * 0.72, W * 0.28])
+    totals_t.setStyle(_TS([
+        ("ALIGN",         (0,0),(-1,-1), "RIGHT"),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LINEABOVE",     (0,-1),(-1,-1), 1.2, BLUE),
+        ("BACKGROUND",    (0,-1),(-1,-1), BLUE_LT),
     ]))
-    story.append(totals_table)
 
-    if quotation.remarks:
-        story.append(Spacer(1, 10))
-        story.append(Paragraph(f"<b>Notes:</b> {quotation.remarks}", small))
+    summary_t = _T([[words_p, totals_t]], colWidths=[W * 0.45, W * 0.55])
+    summary_t.setStyle(_TS([
+        ("VALIGN", (0,0),(-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0),(0,-1), 0),
+    ]))
+    els.append(summary_t)
 
-    # Footer
-    story.append(Spacer(1, 16))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=rl_colors.HexColor("#E5E7EB"), spaceAfter=6))
+    # ═══ 5. REMARKS ══════════════════════════════════════════════════════════
+    if getattr(quotation, "remarks", None):
+        els.append(_Sp(1, 10))
+        els.append(_P(f"<b>Notes / Remarks:</b>  {quotation.remarks}", sNote))
 
-    footer_lines = [
-        "This is a computer-generated quotation and does not require a physical signature.",
-        "Prices are estimates and may vary based on actual parts used during repair.",
-        "This quotation is valid for 7 days from the date of issue.",
-    ]
-    if domain_phone or domain_email:
-        contact_info = "  |  ".join(filter(None, [domain_phone, domain_email]))
-        footer_lines.append(f"For queries, contact us: {contact_info}")
+    # ═══ 6. FOOTER ════════════════════════════════════════════════════════════
+    els.append(_Sp(1, 16))
+    els.append(_HR(width="100%", thickness=0.5, color=DIVIDER, spaceAfter=6))
+    els.append(_P("This is a computer-generated quotation and does not require a physical signature.", sFooter))
+    els.append(_P("Prices are estimates and may vary based on actual parts and labour during the repair visit.", sFooter))
+    els.append(_P("This quotation is valid for 7 days from the date of issue.", sFooter))
+    els.append(_Sp(1, 4))
+    els.append(_HR(width="100%", thickness=0.4, color=DIVIDER, spaceAfter=4))
+    els.append(_P(copyright_txt, sFooter2))
 
-    for line in footer_lines:
-        story.append(Paragraph(line, small))
-
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.read()
+    doc.build(els)
+    buf.seek(0)
+    return buf.read()
 
 
 @router.get("/{quotation_id}/pdf", summary="Download Quotation PDF")

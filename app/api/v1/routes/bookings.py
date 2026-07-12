@@ -1073,6 +1073,7 @@ async def get_booking(booking_id: UUID, current_user: dict = Depends(AnyAuthenti
         "domain_id": str(b.domain_id) if b.domain_id else None,
         "city_id": str(b.city_id) if b.city_id else None,
         "created_at": b.created_at.isoformat() if b.created_at else None,
+        "updated_at": b.updated_at.isoformat() if hasattr(b, "updated_at") and b.updated_at else None,
         "inspection_notes": b.inspection_notes,
         "inspection_photos": (json.loads(b.inspection_photos) if b.inspection_photos else []),
         "inspection_submitted_by": b.inspection_submitted_by,
