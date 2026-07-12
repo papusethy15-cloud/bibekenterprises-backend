@@ -1970,7 +1970,7 @@ def _qt_num_to_words(n: float) -> str:
         return ""
 
 
-def _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts) -> bytes:
+def _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts, cust_address=None) -> bytes:
     """
     Professional Quotation PDF — identical visual language to the Invoice PDF.
 
@@ -2145,13 +2145,15 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     els = []
 
     # ═══ 1. HEADER ═══════════════════════════════════════════════════════════
-    LOGO_SIZE = 36 * mm   # larger logo so branding is clearly visible
+    # Logo — wide landscape format (4:1 ratio, matching admin upload dimensions)
+    LOGO_W = 60 * mm
+    LOGO_H = 15 * mm
 
     logo_cell = None
     logo_bytes = _qt_fetch_logo(logo_url)
     if logo_bytes:
         try:
-            logo_cell = Image(_BIO(logo_bytes), width=LOGO_SIZE, height=LOGO_SIZE)
+            logo_cell = Image(_BIO(logo_bytes), width=LOGO_W, height=LOGO_H)
         except Exception:
             logo_cell = None
 
@@ -2159,7 +2161,7 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
         # Navy monogram fallback
         initials = "".join(w[0].upper() for w in biz_name.split()[:2])
         mono_p = Paragraph(f"<b>{initials}</b>", S("QMono", 16, WHITE, bold=True, align=1))
-        mono_t = Table([[mono_p]], colWidths=[LOGO_SIZE], rowHeights=[LOGO_SIZE])
+        mono_t = Table([[mono_p]], colWidths=[LOGO_W], rowHeights=[LOGO_H])
         mono_t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0),(-1,-1), NAVY),
             ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
@@ -2209,8 +2211,8 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     ]))
     badge_col = [badge_t, Spacer(1, 2*mm), pill_t]
 
-    # Logo col width = LOGO_SIZE + 4mm padding; badge col = 50mm; rest = biz
-    logo_col_w = LOGO_SIZE + 4*mm
+    # Logo col width = LOGO_W + 4mm padding; badge col = 50mm; rest = biz
+    logo_col_w = LOGO_W + 4*mm
     badge_col_w = 50*mm
     biz_col_w   = W - logo_col_w - badge_col_w
 
@@ -2233,7 +2235,20 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     # ═══ 2. QUOTATION TO / BOOKING DETAILS ══════════════════════════════════
     bill_content = [Paragraph("QUOTATION TO", sS_lbl), Paragraph(cust_name, sS_val)]
     if cust_mobile: bill_content.append(Paragraph(cust_mobile, sS_sub))
-    if addr_str_bk: bill_content.append(Paragraph(addr_str_bk, sS_sub))
+    # Full address: address_line1 (from CustomerAddress or booking.address_line), address_line2, city, state - pincode
+    _qt_addr_parts = []
+    _qt_line1 = (getattr(cust_address, "address_line1", None) if cust_address else None) or addr_str_bk
+    if _qt_line1: _qt_addr_parts.append(_qt_line1)
+    if cust_address and getattr(cust_address, "address_line2", None):
+        _qt_addr_parts.append(cust_address.address_line2)
+    _qt_city  = (getattr(cust_address, "city",  None) if cust_address else None) or (booking.city if booking else "") or ""
+    _qt_state = (getattr(cust_address, "state", None) if cust_address else None) or ""
+    _qt_pin   = (getattr(cust_address, "pincode", None) if cust_address else None) or (booking.pincode if booking else "") or ""
+    _qt_city_state = ", ".join(filter(None, [_qt_city, _qt_state]))
+    if _qt_pin: _qt_city_state += f" - {_qt_pin}"
+    if _qt_city_state: _qt_addr_parts.append(_qt_city_state)
+    for _qt_al in _qt_addr_parts:
+        bill_content.append(Paragraph(_qt_al, sS_sub))
 
     bk_content = [Paragraph("BOOKING DETAILS", sS_lbl)]
     bk_content.append(Paragraph(booking_no, sS_val))
@@ -2330,6 +2345,10 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     if subtotal <= 0:
         subtotal = total - tax_amt + disc - adj
 
+    # Determine GST mode from quotation
+    _qt_tax_mode = str(getattr(quotation, "tax_mode", "B2C") or "B2C").upper()
+    _qt_is_non_gst = (_qt_tax_mode == "NONE")
+
     tot_rows = []
     tot_rows.append([Paragraph("Subtotal", sTLbl),
                      Paragraph(f"INR {subtotal:,.2f}", sTVal)])
@@ -2340,10 +2359,20 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     if adj != 0:
         tot_rows.append([Paragraph("Adjustment", sTLbl),
                          Paragraph(f"INR {adj:,.2f}", sTVal)])
-    if tax_amt > 0:
-        lbl = f"Tax ({tax_pct:.0f}%)" if tax_pct > 0 else "Tax"
-        tot_rows.append([Paragraph(lbl, sTLbl),
-                         Paragraph(f"INR {tax_amt:,.2f}", sTVal)])
+    # Show tax only for GST quotations
+    if not _qt_is_non_gst and tax_amt > 0:
+        # Split into CGST+SGST for B2C/B2B style
+        if _qt_tax_mode in ("B2C", "B2B") and tax_pct > 0:
+            half = tax_amt / 2
+            half_pct = tax_pct / 2
+            tot_rows.append([Paragraph(f"CGST ({half_pct:.1f}%)", sTLbl),
+                             Paragraph(f"INR {half:,.2f}", sTVal)])
+            tot_rows.append([Paragraph(f"SGST ({half_pct:.1f}%)", sTLbl),
+                             Paragraph(f"INR {half:,.2f}", sTVal)])
+        else:
+            lbl = f"Tax ({tax_pct:.0f}%)" if tax_pct > 0 else "Tax"
+            tot_rows.append([Paragraph(lbl, sTLbl),
+                             Paragraph(f"INR {tax_amt:,.2f}", sTVal)])
 
     # Grand total row (highlighted)
     tot_rows.append([Paragraph("TOTAL AMOUNT", sTGLbl),
@@ -2483,8 +2512,19 @@ async def get_quotation_pdf(
         select(QuotationPartItem).where(QuotationPartItem.quotation_id == quotation.id)
     )).scalars().all()
 
+    # Load CustomerAddress for full address display in PDF
+    cust_address = None
     try:
-        pdf_bytes = _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts)
+        from app.models.customer import CustomerAddress as _CustAddr
+        if booking and getattr(booking, "address_id", None):
+            cust_address = (await db.execute(
+                select(_CustAddr).where(_CustAddr.id == booking.address_id)
+            )).scalar_one_or_none()
+    except Exception:
+        cust_address = None
+
+    try:
+        pdf_bytes = _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts, cust_address)
     except Exception:
         _pdf_logger.exception("Quotation PDF generation failed, falling back to plain layout")
         buf = BytesIO()

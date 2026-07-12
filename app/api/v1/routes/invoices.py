@@ -422,7 +422,7 @@ def _fetch_logo_reader(url: str):
     return None
 
 
-def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, parts, domain_obj=None) -> bytes:
+def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, parts, domain_obj=None, cust_address=None) -> bytes:
     """
     Professional GST Tax Invoice PDF — Bibek Enterprises / Palei Solutions white-label.
 
@@ -573,28 +573,27 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     # 1. HEADER  (logo | business info | invoice badge)
     # ═══════════════════════════════════════════════════════════════════════════
     # Logo
+    # Logo — wide landscape format (4:1 ratio, 400×100px as uploaded by admin)
+    LOGO_W = 60 * mm
+    LOGO_H = 15 * mm
     logo_cell = None
     logo_reader = _fetch_logo_reader(logo_url)
     if logo_reader:
         try:
             from io import BytesIO as _BIO
-            img_data = logo_reader._fp if hasattr(logo_reader, "_fp") else None
-            # Re-fetch via requests into a fresh BytesIO for Image()
             import requests as _req
             r = _req.get(logo_url, timeout=5)
             if r.status_code == 200:
-                img_buf = _BIO(r.content)
-                logo_img = Image(img_buf, width=36*mm, height=36*mm)
-                logo_cell = logo_img
+                logo_cell = Image(_BIO(r.content), width=LOGO_W, height=LOGO_H)
         except Exception:
             logo_cell = None
 
     if logo_cell is None:
-        # Monogram fallback — navy square with initials
+        # Monogram fallback — navy rectangle with initials
         initials = "".join(w[0].upper() for w in biz_name.split()[:2])
         mono_p = Paragraph(f"<b>{initials}</b>",
                            S("Mono", 16, WHITE, bold=True, align=1))
-        mono_t = Table([[mono_p]], colWidths=[36*mm], rowHeights=[36*mm])
+        mono_t = Table([[mono_p]], colWidths=[LOGO_W], rowHeights=[LOGO_H])
         mono_t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0),(-1,-1), NAVY),
             ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
@@ -651,7 +650,7 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     badge_col = [badge_t, Spacer(1, 2*mm), pill_t]
 
     hdr_t = Table([[logo_cell, biz_col, badge_col]],
-                  colWidths=[40*mm, 92*mm, 50*mm])
+                  colWidths=[64*mm, 68*mm, 50*mm])
     hdr_t.setStyle(TableStyle([
         ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
         ("RIGHTPADDING", (0,0),(0,0), 10),
@@ -680,12 +679,23 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     if cust_phone: bill_content.append(Paragraph(cust_phone, sS_sub))
     if cust_email: bill_content.append(Paragraph(cust_email, sS_sub))
     if booking:
-        addr = ", ".join(filter(None, [
-            booking.address_line,
-            booking.city,
-            booking.pincode,
-        ]))
-        if addr: bill_content.append(Paragraph(addr, sS_sub))
+        # Build full address lines using booking fields + CustomerAddress (address_line1/2, city, state, pincode)
+        _addr_parts = []
+        # Use address_line1 from CustomerAddress if available, else fall back to booking.address_line
+        _line1 = (getattr(cust_address, "address_line1", None) if cust_address else None) or booking.address_line
+        if _line1: _addr_parts.append(_line1)
+        # address_line2 from CustomerAddress
+        if cust_address and getattr(cust_address, "address_line2", None):
+            _addr_parts.append(cust_address.address_line2)
+        # City + State from CustomerAddress if available, else booking.city
+        _city  = (getattr(cust_address, "city",  None) if cust_address else None) or booking.city or ""
+        _state = (getattr(cust_address, "state", None) if cust_address else None) or ""
+        _pin   = (getattr(cust_address, "pincode", None) if cust_address else None) or booking.pincode or ""
+        _city_state = ", ".join(filter(None, [_city, _state]))
+        if _pin: _city_state += f" - {_pin}"
+        if _city_state: _addr_parts.append(_city_state)
+        for _aline in _addr_parts:
+            bill_content.append(Paragraph(_aline, sS_sub))
     # Show customer's B2B GSTIN if it's a GST B2B invoice
     if cust_gstin:
         bill_content.append(Paragraph(f"GSTIN: {cust_gstin}", sS_sub))
@@ -802,19 +812,25 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     paid_amt = total - balance
     total_gst= cgst + sgst + igst
 
-    tot_rows = []
-    tot_rows.append([Paragraph("Subtotal",  sTLbl), Paragraph(f"INR {taxable:,.2f}",  sTVal)])
-    if discount > 0:
-        tot_rows.append([Paragraph("Discount",  sTDLbl), Paragraph(f"- INR {discount:,.2f}", sTDVal)])
-    if cgst > 0:
-        tot_rows.append([Paragraph("CGST (9%)", sTLbl), Paragraph(f"INR {cgst:,.2f}",   sTVal)])
-    if sgst > 0:
-        tot_rows.append([Paragraph("SGST (9%)", sTLbl), Paragraph(f"INR {sgst:,.2f}",   sTVal)])
-    if igst > 0:
-        tot_rows.append([Paragraph("IGST",      sTLbl), Paragraph(f"INR {igst:,.2f}",   sTVal)])
-    elif total_gst > 0 and not (cgst or sgst):
-        tot_rows.append([Paragraph("GST",       sTLbl), Paragraph(f"INR {total_gst:,.2f}", sTVal)])
+    # Determine invoice type for GST/Non-GST display
+    _inv_type_raw = str(getattr(getattr(invoice, "invoice_type", None), "value", None) or
+                        getattr(invoice, "invoice_type", None) or "GST_B2C")
+    _is_non_gst = (_inv_type_raw == "NON_GST")
 
+    tot_rows = []
+    tot_rows.append([Paragraph("Subtotal", sTLbl), Paragraph(f"INR {taxable:,.2f}", sTVal)])
+    if discount > 0:
+        tot_rows.append([Paragraph("Discount", sTDLbl), Paragraph(f"- INR {discount:,.2f}", sTDVal)])
+    if not _is_non_gst:
+        # Show GST breakdown only for GST invoices
+        if cgst > 0:
+            tot_rows.append([Paragraph("CGST (9%)", sTLbl), Paragraph(f"INR {cgst:,.2f}", sTVal)])
+        if sgst > 0:
+            tot_rows.append([Paragraph("SGST (9%)", sTLbl), Paragraph(f"INR {sgst:,.2f}", sTVal)])
+        if igst > 0:
+            tot_rows.append([Paragraph("IGST (18%)", sTLbl), Paragraph(f"INR {igst:,.2f}", sTVal)])
+        elif total_gst > 0 and not (cgst or sgst):
+            tot_rows.append([Paragraph("GST", sTLbl), Paragraph(f"INR {total_gst:,.2f}", sTVal)])
     # Grand total
     tot_rows.append([Paragraph("TOTAL", sTGLbl), Paragraph(f"INR {total:,.2f}", sTGVal)])
 
@@ -867,34 +883,63 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     # ═══════════════════════════════════════════════════════════════════════════
     # 5. PAYMENT DETAILS
     # ═══════════════════════════════════════════════════════════════════════════
-    if dp and (dp.bank_account_number or dp.upi_id):
+    # ── Payment section logic ─────────────────────────────────────────────────
+    # If fully paid → show transaction summary (what was paid, how, when).
+    # If unpaid / partial → show our bank/UPI details so customer can pay.
+    def _pay_table(header, rows_data):
+        pay_rows = [[Paragraph(header, sPayH), Paragraph("", sNote)]]
+        for lbl, val in rows_data:
+            pay_rows.append([Paragraph(lbl, sTLbl), Paragraph(str(val), sPayV)])
+        pt = Table(pay_rows, colWidths=[44*mm, W-44*mm])
+        pt.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  BLUE_XLT),
+            ("SPAN",          (0,0),(-1,0)),
+            ("LINEBELOW",     (0,0),(-1,0),  0.8, BLUE_LT),
+            ("LINEBELOW",     (0,1),(-1,-1), 0.3, DIVIDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+            ("ROUNDEDCORNERS",[3]),
+        ]))
+        return pt
+
+    if is_paid:
+        # Show transaction details (paid_at, amount, method via paid_transactions)
+        txn_data = []
+        if invoice.paid_at:
+            try:
+                _paid_dt = invoice.paid_at.strftime("%d %b %Y, %I:%M %p")
+            except Exception:
+                _paid_dt = str(invoice.paid_at)[:16]
+            txn_data.append(("Paid On", _paid_dt))
+        txn_data.append(("Amount Paid", f"INR {total:,.2f}"))
+        if getattr(invoice, "paid_transactions", None):
+            for t in invoice.paid_transactions:
+                if t.get("transaction_number"):
+                    txn_data.append(("Transaction No.", t["transaction_number"]))
+                if t.get("method"):
+                    txn_data.append(("Payment Method", t["method"].replace("_", " ").title()))
+                if t.get("provider_payment_id"):
+                    txn_data.append(("Payment ID", t["provider_payment_id"]))
+        if txn_data:
+            els.append(_pay_table("PAYMENT RECEIVED", txn_data))
+            els.append(Spacer(1, 6*mm))
+    elif dp and (dp.bank_account_number or dp.upi_id):
+        # Show our bank/UPI details so customer knows where to pay
         pay_data = []
         if dp.bank_account_name:   pay_data.append(("Account Name", dp.bank_account_name))
         if dp.bank_account_number: pay_data.append(("Account No.",  dp.bank_account_number))
-        if dp.bank_ifsc:           pay_data.append(("IFSC",         dp.bank_ifsc))
+        if dp.bank_ifsc:           pay_data.append(("IFSC Code",    dp.bank_ifsc))
         if dp.bank_name:
             bank = dp.bank_name + (f", {dp.bank_branch}" if dp.bank_branch else "")
             pay_data.append(("Bank", bank))
         if dp.upi_id:              pay_data.append(("UPI ID",       dp.upi_id))
-
+        if balance > 0:
+            pay_data.insert(0, ("Amount Due", f"INR {balance:,.2f}"))
         if pay_data:
-            pay_rows = [[Paragraph("PAYMENT DETAILS", sPayH), Paragraph("", sNote)]]
-            for lbl, val in pay_data:
-                pay_rows.append([Paragraph(lbl, sTLbl), Paragraph(val, sPayV)])
-            pay_t = Table(pay_rows, colWidths=[38*mm, W-38*mm])
-            pay_t.setStyle(TableStyle([
-                ("BACKGROUND",    (0,0),(-1,0),  BLUE_XLT),
-                ("SPAN",          (0,0),(-1,0)),
-                ("LINEBELOW",     (0,0),(-1,0),  0.8, BLUE_LT),
-                ("LINEBELOW",     (0,1),(-1,-1), 0.3, DIVIDER),
-                ("TOPPADDING",    (0,0),(-1,-1), 5),
-                ("BOTTOMPADDING", (0,0),(-1,-1), 5),
-                ("LEFTPADDING",   (0,0),(-1,-1), 8),
-                ("RIGHTPADDING",  (0,0),(-1,-1), 8),
-                ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
-                ("ROUNDEDCORNERS",[3]),
-            ]))
-            els.append(pay_t)
+            els.append(_pay_table("PAY TO (BANK / UPI)", pay_data))
             els.append(Spacer(1, 6*mm))
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -997,8 +1042,19 @@ async def get_invoice_pdf(
             "unit_price": round(p.unit_price or 0, 2), "total_price": round(p.total_price or 0, 2),
         } for p in part_rows]
 
+    # Load CustomerAddress for full address in PDF (address_line1, address_line2, city, state, pincode)
+    cust_address = None
     try:
-        pdf_bytes = _build_invoice_pdf(invoice, booking, customer, domain_profile, services, parts, domain_obj)
+        from app.models.customer import CustomerAddress as _CustomerAddress
+        if booking and getattr(booking, "address_id", None):
+            cust_address = (await db.execute(
+                select(_CustomerAddress).where(_CustomerAddress.id == booking.address_id)
+            )).scalar_one_or_none()
+    except Exception:
+        cust_address = None
+
+    try:
+        pdf_bytes = _build_invoice_pdf(invoice, booking, customer, domain_profile, services, parts, domain_obj, cust_address)
     except Exception:
         logger.exception("Premium invoice PDF generation failed, falling back to plain layout")
         buffer = BytesIO()
