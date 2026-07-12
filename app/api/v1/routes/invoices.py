@@ -584,7 +584,7 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
             r = _req.get(logo_url, timeout=5)
             if r.status_code == 200:
                 img_buf = _BIO(r.content)
-                logo_img = Image(img_buf, width=28*mm, height=28*mm)
+                logo_img = Image(img_buf, width=36*mm, height=36*mm)
                 logo_cell = logo_img
         except Exception:
             logo_cell = None
@@ -594,7 +594,7 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
         initials = "".join(w[0].upper() for w in biz_name.split()[:2])
         mono_p = Paragraph(f"<b>{initials}</b>",
                            S("Mono", 16, WHITE, bold=True, align=1))
-        mono_t = Table([[mono_p]], colWidths=[28*mm], rowHeights=[28*mm])
+        mono_t = Table([[mono_p]], colWidths=[36*mm], rowHeights=[36*mm])
         mono_t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0),(-1,-1), NAVY),
             ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
@@ -651,7 +651,7 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     badge_col = [badge_t, Spacer(1, 2*mm), pill_t]
 
     hdr_t = Table([[logo_cell, biz_col, badge_col]],
-                  colWidths=[32*mm, 100*mm, 50*mm])
+                  colWidths=[40*mm, 92*mm, 50*mm])
     hdr_t.setStyle(TableStyle([
         ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
         ("RIGHTPADDING", (0,0),(0,0), 10),

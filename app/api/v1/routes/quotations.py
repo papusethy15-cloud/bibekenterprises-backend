@@ -1918,395 +1918,490 @@ from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors as rl_colors
-from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, SimpleDocTemplate, HRFlowable
+from reportlab.platypus import (Table, TableStyle, Paragraph, Spacer,
+                                 SimpleDocTemplate, HRFlowable, Image, KeepTogether)
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
 import logging as _logging
 _pdf_logger = _logging.getLogger(__name__)
 
 
+def _qt_fetch_logo(url: str):
+    """Best-effort logo fetch for quotation PDF. Returns bytes or None."""
+    if not url:
+        return None
+    try:
+        import requests as _req
+        r = _req.get(url, timeout=5)
+        if r.status_code == 200:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def _qt_num_to_words(n: float) -> str:
+    """Convert a number to Indian-style English words."""
+    try:
+        from num2words import num2words
+        return num2words(int(round(n)), lang="en_IN").title() + " Rupees Only"
+    except Exception:
+        pass
+    try:
+        n = int(round(n))
+        if n == 0:
+            return "Zero Rupees Only"
+        ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+                "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+                "Seventeen", "Eighteen", "Nineteen"]
+        tens_w = ["", "", "Twenty", "Thirty", "Forty", "Fifty",
+                  "Sixty", "Seventy", "Eighty", "Ninety"]
+        def _h(num):
+            if num < 20: return ones[num]
+            if num < 100: return tens_w[num // 10] + (" " + ones[num % 10] if num % 10 else "")
+            return ones[num // 100] + " Hundred" + (" " + _h(num % 100) if num % 100 else "")
+        parts_w = []
+        if n >= 10000000: parts_w.append(_h(n // 10000000) + " Crore"); n %= 10000000
+        if n >= 100000:   parts_w.append(_h(n // 100000)   + " Lakh");  n %= 100000
+        if n >= 1000:     parts_w.append(_h(n // 1000)     + " Thousand"); n %= 1000
+        if n > 0:         parts_w.append(_h(n))
+        return " ".join(parts_w) + " Rupees Only"
+    except Exception:
+        return ""
+
+
 def _build_quotation_pdf(quotation, booking, customer, domain_profile, services, parts) -> bytes:
     """
-    Professional Quotation PDF — matches the invoice PDF visual style.
+    Professional Quotation PDF — identical visual language to the Invoice PDF.
 
-    Layout (A4):
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  [LOGO/MONO]  Business Name (navy, large)    QUOTATION          │
-    │               Tagline, Address, Contact      QT-XXXXXXXXXXXX    │
-    │               GSTIN, PAN                     DD Mon YYYY        │
-    │                                              [Pending Approval]  │
-    ├─────────────────────────────────────────────────────────────────┤
-    │  BILL TO                    │  BOOKING DETAILS                  │
-    │  Customer Name (bold)       │  Booking No.  #BK-XXXXXX         │
-    │  Phone                      │  Service      AC Gas Charging     │
-    │  Address                    │  Scheduled    06 Jul 2026         │
-    ├─────────────────────────────────────────────────────────────────┤
-    │  #  │ Description     │ Type    │ Qty │ Unit Price │ Amount     │
-    │  1  │ Gas Charging    │ Service │  1  │    ₹850    │    ₹850    │
-    │  2  │ R22 Refrigerant │ Part    │  1  │    ₹650    │    ₹650    │
-    ├─────────────────────────────────────────────────────────────────┤
-    │                              │  Discount      - ₹XXX           │
-    │  Amount in Words (italic)    │  Tax (18%)       ₹XXX           │
-    │                              │  ─────────────────────           │
-    │                              │  TOTAL AMOUNT    ₹X,XXX          │
-    ├─────────────────────────────────────────────────────────────────┤
-    │  Notes / Remarks (if any)                                        │
-    ├─────────────────────────────────────────────────────────────────┤
-    │  Terms: Valid 7 days · Prices are estimates · No physical sig.   │
-    │  (c) 2026 BusinessName · Generated automatically                 │
-    └─────────────────────────────────────────────────────────────────┘
+    Layout (A4, 16 mm margins):
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  [LOGO 36mm]  Business Name (navy, 17pt)          QUOTATION             │
+    │               Tagline, Address                    QT-XXXXXXXXXXXX       │
+    │               Phone | Email                       Date: DD Mon YYYY     │
+    │               GSTIN | PAN                         [Pending Approval]    │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │  QUOTATION TO                  │  BOOKING DETAILS                       │
+    │  Customer Name (bold)          │  Booking No.  #BK-XXXXXX              │
+    │  Phone                         │  Service      AC Gas Charging          │
+    │  Address                       │  Scheduled    06 Jul 2026             │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │  #  │ Description    │ Type    │ Qty │ Rate (INR) │ Amount (INR)        │
+    │  1  │ Gas Charging   │ Service │  1  │    850.00  │       850.00        │
+    │  2  │ R22 Refrigerant│ Part    │  1  │    650.00  │       650.00        │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                               │ Subtotal       INR  1,500.00            │
+    │  Amount in Words (italic)     │ Discount       - INR   0.00            │
+    │                               │ Tax (18%)      INR    270.00            │
+    │                               │ ─────────────────────────────           │
+    │                               │ TOTAL AMOUNT   INR  1,770.00            │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │  Notes / Remarks (if any)                                               │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │  Terms: Valid 7 days · Estimates may vary · No physical signature       │
+    │  (c) 2026 BusinessName · Computer-generated quotation                   │
+    └─────────────────────────────────────────────────────────────────────────┘
     """
-    from io import BytesIO as _BIO2
-    from reportlab.lib import colors as rlc
-    from reportlab.lib.pagesizes import A4 as _A4
-    from reportlab.lib.units import mm as _mm
-    from reportlab.lib.styles import getSampleStyleSheet as _gss, ParagraphStyle as _PS
-    from reportlab.lib.enums import TA_RIGHT as _TAR, TA_CENTER as _TAC, TA_LEFT as _TAL
-    from reportlab.platypus import (SimpleDocTemplate as _SDT, Table as _T, TableStyle as _TS,
-                                     Paragraph as _P, Spacer as _Sp, HRFlowable as _HR,
-                                     Image as _Img, KeepTogether as _KT)
     import datetime as _dt
+    from io import BytesIO as _BIO
 
-    # ── Palette (matches invoice) ─────────────────────────────────────────────
-    NAVY    = rlc.HexColor("#1E3A8A")
-    BLUE    = rlc.HexColor("#2563EB")
-    BLUE_LT = rlc.HexColor("#DBEAFE")
-    ORANGE  = rlc.HexColor("#EA580C")
-    AMBER   = rlc.HexColor("#D97706")
-    GREEN   = rlc.HexColor("#16A34A")
-    GREY_DK = rlc.HexColor("#111827")
-    GREY_MD = rlc.HexColor("#6B7280")
-    GREY_LT = rlc.HexColor("#F9FAFB")
-    WHITE   = rlc.white
-    DIVIDER = rlc.HexColor("#E2E8F0")
+    # ── Palette (matches invoice exactly) ─────────────────────────────────────
+    NAVY     = rl_colors.HexColor("#1E3A8A")
+    BLUE     = rl_colors.HexColor("#2563EB")
+    BLUE_LT  = rl_colors.HexColor("#DBEAFE")
+    BLUE_XLT = rl_colors.HexColor("#EFF6FF")
+    ORANGE   = rl_colors.HexColor("#EA580C")
+    GREEN    = rl_colors.HexColor("#16A34A")
+    GREY_DK  = rl_colors.HexColor("#111827")
+    GREY_MD  = rl_colors.HexColor("#6B7280")
+    GREY_LT  = rl_colors.HexColor("#F9FAFB")
+    WHITE    = rl_colors.white
+    DIVIDER  = rl_colors.HexColor("#E2E8F0")
 
-    W = 178 * _mm   # usable page width (A4 - 16mm margins each side)
+    W = 178 * mm  # usable page width (A4 − 16 mm × 2)
 
-    base = _gss()["Normal"]
-    def S(name, size=9, color=GREY_DK, bold=False, italic=False, align=0, leading=None, sb=0, sa=0):
+    # ── Style factory ─────────────────────────────────────────────────────────
+    base = getSampleStyleSheet()["Normal"]
+    def S(name, size=9, color=GREY_DK, bold=False, italic=False,
+          align=0, leading=None, sb=0, sa=0):
         fn = ("Helvetica-BoldOblique" if (bold and italic) else
-              "Helvetica-Bold"  if bold   else
-              "Helvetica-Oblique" if italic else "Helvetica")
-        return _PS(name, parent=base, fontSize=size, textColor=color, fontName=fn,
-                   alignment=align, leading=leading or round(size * 1.4),
-                   spaceBefore=sb, spaceAfter=sa)
+              "Helvetica-Bold"         if bold              else
+              "Helvetica-Oblique"      if italic            else "Helvetica")
+        return ParagraphStyle(name, parent=base,
+                              fontSize=size, textColor=color, fontName=fn,
+                              alignment=align, leading=leading or round(size * 1.4),
+                              spaceBefore=sb, spaceAfter=sa)
 
-    sH_biz  = S("QHBiz",  17, NAVY,    bold=True)
-    sH_tag  = S("QHTag",   9, GREY_MD, italic=True)
-    sH_addr = S("QHAddr",  8, GREY_MD)
-    sH_gst  = S("QHGST",   8, GREY_MD)
-    sB_tit  = S("QBTit",  12, WHITE,   bold=True,  align=2)
-    sB_num  = S("QBNum",   8, rlc.HexColor("#FED7AA"), align=2)
-    sB_dat  = S("QBDat",   8, rlc.HexColor("#FDBA74"), align=2)
-    sB_sta  = S("QBSta",   9, WHITE,   bold=True,  align=2)
-    sS_lbl  = S("QSLbl",   7, GREY_MD, bold=True)
-    sS_val  = S("QSVal",   9, GREY_DK, bold=True)
-    sS_sub  = S("QSSub",   8, GREY_MD)
-    sTH     = S("QTH",     9, WHITE,   bold=True)
-    sTD     = S("QTD",     9, GREY_DK)
-    sTDr    = S("QTDr",    9, GREY_DK, align=2)
-    sTDbr   = S("QTDbr",   9, GREY_DK, bold=True, align=2)
-    sTLbl   = S("QTLbl",   9, GREY_MD)
-    sTVal   = S("QTVal",   9, GREY_DK, bold=True, align=2)
-    sTGLbl  = S("QTGLbl", 10, NAVY,    bold=True)
-    sTGVal  = S("QTGVal", 10, ORANGE,  bold=True, align=2)
-    sWords  = S("QWords",  7, GREY_MD, italic=True, align=2)
-    sNote   = S("QNote",   8, GREY_MD)
-    sFooter = S("QFoot",   8, GREY_MD, align=1)
-    sFooter2= S("QFoot2",  7, rlc.HexColor("#9CA3AF"), align=1)
+    # Header styles
+    sH_biz   = S("QHBiz",  17, NAVY,    bold=True)
+    sH_tag   = S("QHTag",   9, GREY_MD, italic=True)
+    sH_addr  = S("QHAddr",  8, GREY_MD)
+    sH_gst   = S("QHGST",   8, GREY_MD)
+    # Badge
+    sB_title = S("QBTit",  11, WHITE,   bold=True,  align=2)
+    sB_num   = S("QBNum",   8, rl_colors.HexColor("#BFDBFE"), align=2)
+    sB_date  = S("QBDat",   8, rl_colors.HexColor("#93C5FD"), align=2)
+    # Section
+    sS_lbl   = S("QSLbl",   7, GREY_MD, bold=True)
+    sS_val   = S("QSVal",   9, GREY_DK, bold=True)
+    sS_sub   = S("QSSub",   8, GREY_MD)
+    # Table
+    sTH      = S("QTH",     9, WHITE,   bold=True)
+    sTD      = S("QTD",     9, GREY_DK)
+    sTDr     = S("QTDr",    9, GREY_DK, align=2)
+    sTDbr    = S("QTDbr",   9, GREY_DK, bold=True, align=2)
+    # Totals
+    sTLbl    = S("QTLbl",   9, GREY_MD)
+    sTVal    = S("QTVal",   9, GREY_DK, bold=True, align=2)
+    sTGLbl   = S("QTGLbl", 10, NAVY,   bold=True)
+    sTGVal   = S("QTGVal", 10, ORANGE, bold=True, align=2)
+    sTDLbl   = S("QTDLbl",  9, GREEN)
+    sTDVal   = S("QTDVal",  9, GREEN,  align=2)
+    sWords   = S("QWords",  7, GREY_MD, italic=True, align=2)
+    sNote    = S("QNote",   8, GREY_MD)
+    sPayH    = S("QPayH",   9, NAVY,   bold=True)
+    sFooter  = S("QFoot",   8, GREY_MD, align=1)
+    sFooter2 = S("QFoot2",  7, rl_colors.HexColor("#9CA3AF"), align=1)
 
-    # ── Collect business info ─────────────────────────────────────────────────
-    dp = domain_profile  # dict or None
-    biz_name  = (dp.get("business_name") or dp.get("business_legal_name") if dp else None) or "Bibek Enterprises"
-    tagline   = dp.get("tagline")            if dp else None
-    logo_url  = dp.get("logo_url")           if dp else None
-    gstin     = dp.get("gstin")              if dp else None
-    pan       = dp.get("pan_number")         if dp else None
-    phone     = dp.get("support_phone")      if dp else None
-    email_str = dp.get("support_email")      if dp else None
-    addr_raw  = dp.get("address") or dp.get("office_address") or "" if dp else ""
-    copyright_txt = dp.get("copyright_text") if dp else None
-    copyright_txt = copyright_txt or f"(c) {_dt.datetime.utcnow().year} {biz_name}. All rights reserved."
+    # ── Collect business info from domain_profile (dict passed by endpoint) ───
+    # domain_profile is a plain dict with keys matching DomainProfile columns.
+    dp = domain_profile or {}
 
+    biz_name  = (dp.get("business_legal_name") or dp.get("business_name") or "Bibek Enterprises")
+    tagline   = dp.get("tagline") or None
+    logo_url  = dp.get("logo_url") or None
+    gstin     = dp.get("gstin") or None
+    pan       = dp.get("pan_number") or None
+    phone     = dp.get("support_phone") or None
+    email_str = dp.get("support_email") or None
+    # Address from profile
+    addr_parts = []
+    if dp.get("office_address"): addr_parts.append(dp["office_address"])
+    city_line  = ", ".join(filter(None, [dp.get("office_city"), dp.get("office_state")]))
+    if dp.get("office_pincode"): city_line += f" - {dp['office_pincode']}"
+    if city_line: addr_parts.append(city_line)
+    copyright_txt = (dp.get("copyright_text") or
+                     f"(c) {_dt.datetime.utcnow().year} {biz_name}. All rights reserved.")
+
+    # ── Customer info ─────────────────────────────────────────────────────────
     cust_name   = (getattr(customer, "name", None) or
                    f"{getattr(customer, 'first_name', '') or ''} {getattr(customer, 'last_name', '') or ''}".strip() or
                    "Customer")
-    cust_mobile = getattr(customer, "mobile", None) or getattr(customer, "mobile_number", None) or ""
-    booking_no  = booking.booking_number if booking else "—"
-    service_nm  = (booking.service_name  if (booking and hasattr(booking, "service_name") and booking.service_name) else "Service")
+    cust_mobile = (getattr(customer, "mobile", None) or
+                   getattr(customer, "mobile_number", None) or "")
+
+    # ── Booking info ──────────────────────────────────────────────────────────
+    booking_no  = (booking.booking_number if booking else "—")
+    service_nm  = (booking.service_name   if (booking and getattr(booking, "service_name", None)) else "Service")
     sched_str   = ""
     try:
         if booking and booking.scheduled_date:
-            _sd = booking.scheduled_date
-            sched_str = _sd.strftime("%-d %b %Y") if hasattr(_sd, "strftime") else str(_sd)[:10]
+            sd = booking.scheduled_date
+            sched_str = sd.strftime("%d %b %Y") if hasattr(sd, "strftime") else str(sd)[:10]
     except Exception:
         pass
-
-    created_str = ""
-    try:
-        if quotation.created_at:
-            _cd = quotation.created_at
-            created_str = _cd.strftime("%-d %b %Y") if hasattr(_cd, "strftime") else str(_cd)[:10]
-    except Exception:
-        created_str = ""
-
-    status_label = {
-        "DRAFT": "Draft",
-        "SUBMITTED": "Pending Approval",
-        "APPROVED": "Approved",
-        "REJECTED": "Rejected",
-        "REVISED": "Revised",
-        "CONVERTED_TO_INVOICE": "Converted to Invoice",
-        "EXPIRED": "Expired",
-    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), "Pending Approval")
-
-    badge_color = {
-        "APPROVED": rlc.HexColor("#059669"),
-        "REJECTED": rlc.HexColor("#DC2626"),
-        "CONVERTED_TO_INVOICE": rlc.HexColor("#7C3AED"),
-        "EXPIRED": rlc.HexColor("#6B7280"),
-    }.get(str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status), ORANGE)
-
-    # ── Document ──────────────────────────────────────────────────────────────
-    buf = _BIO2()
-    doc = _SDT(buf, pagesize=_A4, topMargin=14*_mm, bottomMargin=14*_mm,
-               leftMargin=16*_mm, rightMargin=16*_mm,
-               title=f"Quotation {quotation.quotation_number}")
-    els = []
-
-    # ═══ 1. HEADER ═══════════════════════════════════════════════════════════
-    # Logo / monogram
-    logo_cell = None
-    if logo_url:
-        try:
-            import requests as _req
-            r = _req.get(logo_url, timeout=5)
-            if r.status_code == 200:
-                from io import BytesIO as _LB
-                logo_cell = _Img(_LB(r.content), width=28*_mm, height=28*_mm)
-        except Exception:
-            logo_cell = None
-    if logo_cell is None:
-        initials = "".join(w[0].upper() for w in biz_name.split()[:2])
-        mono_p = _P(f"<b>{initials}</b>", S("QMono", 16, WHITE, bold=True, align=1))
-        mono_t = _T([[mono_p]], colWidths=[28*_mm], rowHeights=[28*_mm])
-        mono_t.setStyle(_TS([
-            ("BACKGROUND", (0,0),(-1,-1), NAVY),
-            ("VALIGN",     (0,0),(-1,-1), "MIDDLE"),
-            ("ALIGN",      (0,0),(-1,-1), "CENTER"),
-            ("ROUNDEDCORNERS", [4]),
-        ]))
-        logo_cell = mono_t
-
-    # Business info column
-    biz_col = [_P(biz_name, sH_biz)]
-    if tagline:
-        biz_col.append(_P(tagline, sH_tag))
-    if addr_raw:
-        biz_col.append(_P(addr_raw, sH_addr))
-    contact = "  |  ".join(filter(None, [phone, email_str]))
-    if contact:
-        biz_col.append(_P(contact, sH_addr))
-    gst_str = "  |  ".join(filter(None, [f"GSTIN: {gstin}" if gstin else None, f"PAN: {pan}" if pan else None]))
-    if gst_str:
-        biz_col.append(_P(gst_str, sH_gst))
-
-    # Badge column (right-aligned, coloured background)
-    badge_col = [
-        _P("<b>QUOTATION</b>", sB_tit),
-        _P(f"{quotation.quotation_number}", sB_num),
-        _P(f"Date: {created_str}", sB_dat),
-        _P(f"<b>{status_label}</b>", sB_sta),
-    ]
-    badge_t = _T([[_P(b.text if hasattr(b, "text") else "", sB_sta)] if False else [b] for b in badge_col],
-                  colWidths=[46*_mm])
-    badge_t.setStyle(_TS([
-        ("BACKGROUND",    (0,0),(-1,-1), badge_color),
-        ("ROUNDEDCORNERS",[6]),
-        ("TOPPADDING",    (0,0),(-1,-1), 5),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
-        ("LEFTPADDING",   (0,0),(-1,-1), 8),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
-        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
-    ]))
-
-    header_t = _T([[logo_cell, biz_col, badge_t]], colWidths=[32*_mm, 100*_mm, 46*_mm])
-    header_t.setStyle(_TS([
-        ("VALIGN",         (0,0),(-1,-1), "TOP"),
-        ("RIGHTPADDING",   (1,0),(1,0),   12),
-        ("LEFTPADDING",    (0,0),(0,0),    0),
-        ("BOTTOMPADDING",  (0,0),(-1,-1),  4),
-    ]))
-    els.append(header_t)
-    els.append(_Sp(1, 6))
-    els.append(_HR(width="100%", thickness=1.5, color=NAVY, spaceAfter=10))
-
-    # ═══ 2. BILL TO / BOOKING DETAILS ROW ════════════════════════════════════
-    # Address string from booking
     addr_str_bk = ""
     try:
         if booking:
             for field in ("address_line", "address", "address_str"):
                 v = getattr(booking, field, None)
                 if v:
-                    addr_str_bk = str(v)[:80]
+                    addr_str_bk = str(v)[:100]
                     break
     except Exception:
         pass
 
-    def _info_cell(label, *lines):
-        parts = [_P(f"<b>{label}</b>", S(f"_lbl{label}", 7, GREY_MD, bold=True))]
-        for line in lines:
-            if line:
-                parts.append(_P(str(line), S(f"_v{label}", 9, GREY_DK)))
-        return parts
+    # ── Quotation meta ────────────────────────────────────────────────────────
+    created_str = ""
+    try:
+        cd = quotation.created_at
+        created_str = cd.strftime("%d %b %Y") if hasattr(cd, "strftime") else str(cd)[:10]
+    except Exception:
+        pass
 
-    bill_col = _info_cell("BILL TO", cust_name, cust_mobile, addr_str_bk or None)
-    book_col = _info_cell("BOOKING DETAILS",
-                          f"Booking No:  #{booking_no}",
-                          f"Service:  {service_nm}",
-                          f"Scheduled:  {sched_str}" if sched_str else None)
+    _status_raw = str(quotation.status.value if hasattr(quotation.status, "value") else quotation.status)
+    status_label = {
+        "DRAFT":                "Draft",
+        "SUBMITTED":            "Pending Approval",
+        "APPROVED":             "Approved",
+        "REJECTED":             "Rejected",
+        "REVISED":              "Revised",
+        "CONVERTED_TO_INVOICE": "Converted to Invoice",
+        "EXPIRED":              "Expired",
+    }.get(_status_raw, "Pending Approval")
+    badge_bg = {
+        "APPROVED":             rl_colors.HexColor("#059669"),
+        "REJECTED":             rl_colors.HexColor("#DC2626"),
+        "CONVERTED_TO_INVOICE": rl_colors.HexColor("#7C3AED"),
+        "EXPIRED":              GREY_MD,
+    }.get(_status_raw, ORANGE)
 
-    info_t = _T([[bill_col, book_col]], colWidths=[W * 0.5, W * 0.5])
-    info_t.setStyle(_TS([
-        ("BACKGROUND",    (0,0),(-1,-1), GREY_LT),
-        ("VALIGN",        (0,0),(-1,-1), "TOP"),
-        ("TOPPADDING",    (0,0),(-1,-1), 10),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
-        ("LEFTPADDING",   (0,0),(-1,-1), 12),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 12),
-        ("LINEAFTER",     (0,0),(0,-1),  0.5, DIVIDER),
+    # ── Document ──────────────────────────────────────────────────────────────
+    buf = _BIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            topMargin=14*mm, bottomMargin=14*mm,
+                            leftMargin=16*mm, rightMargin=16*mm,
+                            title=f"Quotation {quotation.quotation_number}")
+    els = []
+
+    # ═══ 1. HEADER ═══════════════════════════════════════════════════════════
+    LOGO_SIZE = 36 * mm   # larger logo so branding is clearly visible
+
+    logo_cell = None
+    logo_bytes = _qt_fetch_logo(logo_url)
+    if logo_bytes:
+        try:
+            logo_cell = Image(_BIO(logo_bytes), width=LOGO_SIZE, height=LOGO_SIZE)
+        except Exception:
+            logo_cell = None
+
+    if logo_cell is None:
+        # Navy monogram fallback
+        initials = "".join(w[0].upper() for w in biz_name.split()[:2])
+        mono_p = Paragraph(f"<b>{initials}</b>", S("QMono", 16, WHITE, bold=True, align=1))
+        mono_t = Table([[mono_p]], colWidths=[LOGO_SIZE], rowHeights=[LOGO_SIZE])
+        mono_t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), NAVY),
+            ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+            ("ALIGN",         (0,0),(-1,-1), "CENTER"),
+            ("ROUNDEDCORNERS",[4]),
+        ]))
+        logo_cell = mono_t
+
+    # Business info column
+    biz_col = [Paragraph(biz_name, sH_biz)]
+    if tagline:
+        biz_col.append(Paragraph(tagline, sH_tag))
+    for a in addr_parts:
+        biz_col.append(Paragraph(a, sH_addr))
+    contact = "  |  ".join(filter(None, [phone, email_str]))
+    if contact:
+        biz_col.append(Paragraph(contact, sH_addr))
+    gst_str = "  |  ".join(filter(None, [
+        f"GSTIN: {gstin}" if gstin else None,
+        f"PAN: {pan}"     if pan    else None,
+    ]))
+    if gst_str:
+        biz_col.append(Paragraph(gst_str, sH_gst))
+
+    # Badge column (navy box + status pill, matches invoice)
+    badge_rows = [
+        [Paragraph("<b>QUOTATION</b>", sB_title)],
+        [Paragraph(quotation.quotation_number, sB_num)],
+        [Paragraph(f"Date: {created_str}", sB_date)],
+    ]
+    badge_t = Table(badge_rows, colWidths=[46*mm])
+    badge_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), NAVY),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
         ("ROUNDEDCORNERS",[4]),
     ]))
-    els.append(_KT([info_t, _Sp(1, 10)]))
+    pill_t = Table([[Paragraph(status_label, S("QPill", 8, WHITE, bold=True, align=1))]],
+                   colWidths=[46*mm], rowHeights=[14])
+    pill_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), badge_bg),
+        ("TOPPADDING",    (0,0),(-1,-1), 3),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 3),
+        ("ROUNDEDCORNERS",[3]),
+    ]))
+    badge_col = [badge_t, Spacer(1, 2*mm), pill_t]
+
+    # Logo col width = LOGO_SIZE + 4mm padding; badge col = 50mm; rest = biz
+    logo_col_w = LOGO_SIZE + 4*mm
+    badge_col_w = 50*mm
+    biz_col_w   = W - logo_col_w - badge_col_w
+
+    hdr_t = Table([[logo_cell, biz_col, badge_col]],
+                  colWidths=[logo_col_w, biz_col_w, badge_col_w])
+    hdr_t.setStyle(TableStyle([
+        ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+        ("RIGHTPADDING", (0,0),(0,0),   10),
+        ("LEFTPADDING",  (2,0),(2,0),    4),
+    ]))
+    els.append(hdr_t)
+    els.append(Spacer(1, 3*mm))
+
+    # Full-width blue accent rule (matches invoice)
+    rule_t = Table([[""]], colWidths=[W], rowHeights=[2])
+    rule_t.setStyle(TableStyle([("BACKGROUND", (0,0),(-1,-1), BLUE)]))
+    els.append(rule_t)
+    els.append(Spacer(1, 5*mm))
+
+    # ═══ 2. QUOTATION TO / BOOKING DETAILS ══════════════════════════════════
+    bill_content = [Paragraph("QUOTATION TO", sS_lbl), Paragraph(cust_name, sS_val)]
+    if cust_mobile: bill_content.append(Paragraph(cust_mobile, sS_sub))
+    if addr_str_bk: bill_content.append(Paragraph(addr_str_bk, sS_sub))
+
+    bk_content = [Paragraph("BOOKING DETAILS", sS_lbl)]
+    bk_content.append(Paragraph(booking_no, sS_val))
+    if service_nm:  bk_content.append(Paragraph(f"Service: {service_nm}", sS_sub))
+    if sched_str:   bk_content.append(Paragraph(f"Scheduled: {sched_str}", sS_sub))
+
+    info_t = Table([[bill_content, bk_content]], colWidths=[W / 2, W / 2])
+    info_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), BLUE_XLT),
+        ("LEFTPADDING",   (0,0),(-1,-1), 10),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 10),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",        (0,0),(-1,-1), "TOP"),
+        ("LINEAFTER",     (0,0),(0,-1),  0.5, BLUE_LT),
+        ("LINEBELOW",     (0,-1),(-1,-1), 1, BLUE),
+        ("ROUNDEDCORNERS",[3]),
+    ]))
+    els.append(info_t)
+    els.append(Spacer(1, 5*mm))
 
     # ═══ 3. LINE ITEMS TABLE ══════════════════════════════════════════════════
-    col_w = [7*_mm, None, 20*_mm, 18*_mm, 28*_mm, 28*_mm]
-
-    def _th(txt): return _P(f"<b>{txt}</b>", sTH)
-    rows = [[_th("#"), _th("Description"), _th("Type"), _th("Qty"), _th("Unit Price"), _th("Amount")]]
+    # Column widths matching invoice: #, Description, Type, Qty, Rate, Amount
+    CW = [10*mm, 76*mm, 20*mm, 14*mm, 28*mm, 28*mm]
+    rows = [[
+        Paragraph("#",           sTH),
+        Paragraph("Description", sTH),
+        Paragraph("Type",        sTH),
+        Paragraph("Qty",         sTH),
+        Paragraph("Rate (INR)",  sTH),
+        Paragraph("Amt (INR)",   sTH),
+    ]]
     idx = 1
     for s in services:
+        name = (getattr(s, "service_name", None) or
+                getattr(s, "custom_service_name", None) or "Service")
         rows.append([
-            _P(str(idx), sTD),
-            _P(s.service_name or getattr(s, "custom_service_name", None) or "—", sTD),
-            _P("Service", sTD),
-            _P(str(s.quantity), _P(str(s.quantity), sTD).__class__("_", 9, GREY_DK, align=1) if False else sTDr),
-            _P(f"₹{s.unit_price:.0f}", sTDr),
-            _P(f"₹{s.total_price:.0f}", sTDr),
+            Paragraph(str(idx), sTDr),
+            Paragraph(name, sTD),
+            Paragraph("Service", sTD),
+            Paragraph(str(s.quantity), sTDr),
+            Paragraph(f"{float(s.unit_price):,.2f}", sTDr),
+            Paragraph(f"{float(s.total_price):,.2f}", sTDbr),
         ])
         idx += 1
     for p in parts:
+        name = getattr(p, "part_name", None) or "Part"
         rows.append([
-            _P(str(idx), sTD),
-            _P(getattr(p, "part_name", "Part"), sTD),
-            _P("Part", sTD),
-            _P(str(p.quantity), sTDr),
-            _P(f"₹{p.unit_price:.0f}", sTDr),
-            _P(f"₹{p.total_price:.0f}", sTDr),
+            Paragraph(str(idx), sTDr),
+            Paragraph(name, sTD),
+            Paragraph("Part", sTD),
+            Paragraph(str(p.quantity), sTDr),
+            Paragraph(f"{float(p.unit_price):,.2f}", sTDr),
+            Paragraph(f"{float(p.total_price):,.2f}", sTDbr),
         ])
         idx += 1
+    if not services and not parts:
+        # Fallback row if no items
+        total_fb = float(quotation.total_amount or 0)
+        rows.append([
+            Paragraph("1", sTDr),
+            Paragraph("Service Charges", sTD),
+            Paragraph("Service", sTD),
+            Paragraph("1", sTDr),
+            Paragraph(f"{total_fb:,.2f}", sTDr),
+            Paragraph(f"{total_fb:,.2f}", sTDbr),
+        ])
 
-    items_t = _T(rows, colWidths=col_w, repeatRows=1)
-    items_t.setStyle(_TS([
-        ("BACKGROUND",    (0,0),(-1,0),  BLUE),
-        ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
-        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0,0),(-1,0),  9),
+    nr = len(rows)
+    items_t = Table(rows, colWidths=CW, repeatRows=1)
+    items_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0),  NAVY),
+        ("LINEBELOW",     (0,0),(-1,0),  1.5, BLUE),
         ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, GREY_LT]),
-        ("FONTSIZE",      (0,1),(-1,-1), 9),
-        ("ALIGN",         (0,0),(0,-1),  "CENTER"),
-        ("ALIGN",         (3,0),(-1,-1), "RIGHT"),
+        ("LINEBELOW",     (0,1),(-1,-2), 0.3, DIVIDER),
+        ("LINEBELOW",     (0,nr-1),(-1,nr-1), 1.5, NAVY),
+        ("TOPPADDING",    (0,0),(-1,-1), 7),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 7),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 6),
         ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
-        ("GRID",          (0,0),(-1,-1), 0.4, DIVIDER),
-        ("TOPPADDING",    (0,0),(-1,-1), 6),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
-        ("LEFTPADDING",   (0,0),(-1,-1), 5),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 5),
     ]))
     els.append(items_t)
-    els.append(_Sp(1, 8))
+    els.append(Spacer(1, 5*mm))
 
     # ═══ 4. TOTALS ════════════════════════════════════════════════════════════
-    # Amount in words (right side totals + left side words)
     subtotal = float(getattr(quotation, "subtotal_amount", 0) or 0)
     disc     = float(quotation.discount_amount or 0)
     adj      = float(getattr(quotation, "adjustment_amount", 0) or 0)
     tax_pct  = float(quotation.tax_percent or 0)
     tax_amt  = float(quotation.tax_amount or 0)
     total    = float(quotation.total_amount or 0)
+    # Derive subtotal if not set
+    if subtotal <= 0:
+        subtotal = total - tax_amt + disc - adj
 
-    def _num_to_words(n):
-        """Simple integer-to-words for Indian rupees (up to crores)."""
-        try:
-            n = int(round(n))
-            if n == 0: return "Zero"
-            ones = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine",
-                    "Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen",
-                    "Seventeen","Eighteen","Nineteen"]
-            tens_w = ["","","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"]
-            def _h(num):
-                if num < 20: return ones[num]
-                if num < 100: return tens_w[num//10] + (" " + ones[num%10] if num%10 else "")
-                return ones[num//100] + " Hundred" + (" " + _h(num%100) if num%100 else "")
-            parts_w = []
-            if n >= 10000000:
-                parts_w.append(_h(n // 10000000) + " Crore"); n %= 10000000
-            if n >= 100000:
-                parts_w.append(_h(n // 100000) + " Lakh"); n %= 100000
-            if n >= 1000:
-                parts_w.append(_h(n // 1000) + " Thousand"); n %= 1000
-            if n > 0:
-                parts_w.append(_h(n))
-            return " ".join(parts_w)
-        except Exception:
-            return ""
-
-    words_str = _num_to_words(total)
-    words_p = _P(f"<i>Indian Rupees {words_str} Only</i>", sWords)
-
-    totals_rows = []
-    if subtotal > 0 and (disc > 0 or adj != 0):
-        totals_rows.append([_P("Subtotal:", sTLbl), _P(f"₹{subtotal:.0f}", sTVal)])
+    tot_rows = []
+    tot_rows.append([Paragraph("Subtotal", sTLbl),
+                     Paragraph(f"INR {subtotal:,.2f}", sTVal)])
     if disc > 0:
-        totals_rows.append([_P("Discount:", sTLbl), _P(f"- ₹{disc:.0f}", S("_disc", 9, rlc.HexColor("#DC2626"), align=2))])
+        tot_rows.append([Paragraph("Discount", sTDLbl),
+                         Paragraph(f"- INR {disc:,.2f}",
+                                   S("QDisc", 9, rl_colors.HexColor("#DC2626"), align=2))])
     if adj != 0:
-        totals_rows.append([_P("Adjustment:", sTLbl), _P(f"₹{adj:.0f}", sTVal)])
+        tot_rows.append([Paragraph("Adjustment", sTLbl),
+                         Paragraph(f"INR {adj:,.2f}", sTVal)])
     if tax_amt > 0:
-        totals_rows.append([_P(f"Tax ({tax_pct:.0f}%):", sTLbl), _P(f"₹{tax_amt:.0f}", sTVal)])
-    totals_rows.append([_P("<b>TOTAL AMOUNT:</b>", sTGLbl), _P(f"<b>₹{total:.0f}</b>", sTGVal)])
+        lbl = f"Tax ({tax_pct:.0f}%)" if tax_pct > 0 else "Tax"
+        tot_rows.append([Paragraph(lbl, sTLbl),
+                         Paragraph(f"INR {tax_amt:,.2f}", sTVal)])
 
-    totals_t = _T(totals_rows, colWidths=[W * 0.72, W * 0.28])
-    totals_t.setStyle(_TS([
-        ("ALIGN",         (0,0),(-1,-1), "RIGHT"),
-        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+    # Grand total row (highlighted)
+    tot_rows.append([Paragraph("TOTAL AMOUNT", sTGLbl),
+                     Paragraph(f"INR {total:,.2f}", sTGVal)])
+
+    grand_idx = len(tot_rows) - 1
+    tot_t = Table(tot_rows, colWidths=[42*mm, 38*mm], hAlign="RIGHT")
+    tot_t.setStyle(TableStyle([
+        ("LINEBELOW",     (0,0),(-1, grand_idx-1), 0.4, DIVIDER),
+        ("LINEABOVE",     (0, grand_idx),(-1, grand_idx), 1.5, NAVY),
+        ("LINEBELOW",     (0, grand_idx),(-1, grand_idx), 1.5, NAVY),
+        ("BACKGROUND",    (0, grand_idx),(-1, grand_idx), BLUE_XLT),
         ("TOPPADDING",    (0,0),(-1,-1), 4),
         ("BOTTOMPADDING", (0,0),(-1,-1), 4),
-        ("LINEABOVE",     (0,-1),(-1,-1), 1.2, BLUE),
-        ("BACKGROUND",    (0,-1),(-1,-1), BLUE_LT),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 6),
+        ("ROUNDEDCORNERS",[3]),
     ]))
 
-    summary_t = _T([[words_p, totals_t]], colWidths=[W * 0.45, W * 0.55])
-    summary_t.setStyle(_TS([
-        ("VALIGN", (0,0),(-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0),(0,-1), 0),
-    ]))
-    els.append(summary_t)
+    words_str = _qt_num_to_words(total)
+    els.append(Table([[Paragraph("", sNote), tot_t]],
+                     colWidths=[W - 82*mm, 82*mm],
+                     style=TableStyle([("VALIGN", (0,0),(-1,-1), "TOP")])))
+    if words_str:
+        els.append(Table([[Paragraph("", sNote),
+                           Paragraph(words_str, sWords)]],
+                         colWidths=[W - 82*mm, 82*mm]))
+    els.append(Spacer(1, 7*mm))
 
     # ═══ 5. REMARKS ══════════════════════════════════════════════════════════
     if getattr(quotation, "remarks", None):
-        els.append(_Sp(1, 10))
-        els.append(_P(f"<b>Notes / Remarks:</b>  {quotation.remarks}", sNote))
+        remarks_block = [
+            Paragraph("Notes / Remarks", sPayH),
+            Paragraph(quotation.remarks, sNote),
+        ]
+        els.append(KeepTogether(remarks_block))
+        els.append(Spacer(1, 5*mm))
 
-    # ═══ 6. FOOTER ════════════════════════════════════════════════════════════
-    els.append(_Sp(1, 16))
-    els.append(_HR(width="100%", thickness=0.5, color=DIVIDER, spaceAfter=6))
-    els.append(_P("This is a computer-generated quotation and does not require a physical signature.", sFooter))
-    els.append(_P("Prices are estimates and may vary based on actual parts and labour during the repair visit.", sFooter))
-    els.append(_P("This quotation is valid for 7 days from the date of issue.", sFooter))
-    els.append(_Sp(1, 4))
-    els.append(_HR(width="100%", thickness=0.4, color=DIVIDER, spaceAfter=4))
-    els.append(_P(copyright_txt, sFooter2))
+    # ═══ 6. TERMS & FOOTER ════════════════════════════════════════════════════
+    terms_block = [Paragraph("Terms & Conditions", sPayH)]
+    for t in [
+        "1. This quotation is computer-generated and valid for 7 days from the date of issue.",
+        "2. Prices are estimates and may vary based on actual parts and labour during the visit.",
+        "3. This document does not require a physical signature.",
+    ]:
+        terms_block.append(Paragraph(t, sNote))
+    els.append(KeepTogether(terms_block))
+    els.append(Spacer(1, 7*mm))
+
+    foot_rule = Table([[""]], colWidths=[W], rowHeights=[0.8])
+    foot_rule.setStyle(TableStyle([("BACKGROUND", (0,0),(-1,-1), BLUE_LT)]))
+    els.append(foot_rule)
+    els.append(Spacer(1, 3*mm))
+    els.append(Paragraph(copyright_txt, sFooter))
+    els.append(Paragraph(
+        "This is a computer-generated quotation and does not require a physical signature.",
+        sFooter2,
+    ))
 
     doc.build(els)
     buf.seek(0)
@@ -2340,21 +2435,45 @@ async def get_quotation_pdf(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    # Load domain profile for branding
+    # Load domain profile for branding (DomainProfile has logo, address, GSTIN, etc.)
     domain_profile = None
     try:
-        domain = (await db.execute(select(Domain).where(Domain.id == booking.domain_id))).scalar_one_or_none()
-        if domain:
-            domain_profile = {
-                "business_name": domain.business_name or domain.name,
-                "address": domain.address or "",
-                "gstin": domain.gstin or "",
-                "support_phone": getattr(domain, "support_phone", None) or "",
-                "support_email": getattr(domain, "support_email", None) or "",
-                "logo_url": getattr(domain, "logo_url", None) or "",
-            }
+        from app.models.domain import DomainProfile as _DomainProfile
+        domain_id = getattr(booking, "domain_id", None)
+        if domain_id:
+            dp_obj = (await db.execute(
+                select(_DomainProfile).where(_DomainProfile.domain_id == domain_id)
+            )).scalar_one_or_none()
+            if dp_obj:
+                # Convert ORM object to plain dict so _build_quotation_pdf can use .get()
+                domain_profile = {
+                    "business_name":      getattr(dp_obj, "business_legal_name", None) or "",
+                    "business_legal_name":getattr(dp_obj, "business_legal_name", None) or "",
+                    "tagline":            getattr(dp_obj, "tagline", None) or "",
+                    "logo_url":           getattr(dp_obj, "logo_url", None) or "",
+                    "gstin":              getattr(dp_obj, "gstin", None) or "",
+                    "pan_number":         getattr(dp_obj, "pan_number", None) or "",
+                    "support_phone":      getattr(dp_obj, "support_phone", None) or "",
+                    "support_email":      getattr(dp_obj, "support_email", None) or "",
+                    "office_address":     getattr(dp_obj, "office_address", None) or "",
+                    "office_city":        getattr(dp_obj, "office_city", None) or "",
+                    "office_state":       getattr(dp_obj, "office_state", None) or "",
+                    "office_pincode":     getattr(dp_obj, "office_pincode", None) or "",
+                    "copyright_text":     getattr(dp_obj, "copyright_text", None) or "",
+                }
+            else:
+                # Fallback: load from Domain table basic info
+                domain = (await db.execute(select(Domain).where(Domain.id == domain_id))).scalar_one_or_none()
+                if domain:
+                    domain_profile = {
+                        "business_name":  getattr(domain, "business_name", None) or getattr(domain, "name", "") or "",
+                        "logo_url":       getattr(domain, "logo_url", None) or "",
+                        "gstin":          getattr(domain, "gstin", None) or "",
+                        "support_phone":  getattr(domain, "support_phone", None) or "",
+                        "support_email":  getattr(domain, "support_email", None) or "",
+                    }
     except Exception:
-        pass
+        domain_profile = {}
 
     # Load services and parts line items
     services = (await db.execute(
