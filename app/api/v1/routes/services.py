@@ -87,7 +87,9 @@ def _category_row(c: ServiceCategory) -> dict:
 
 def _service_row(s: Service) -> dict:
     return {
-        "id": str(s.id), "category_id": str(s.category_id), "name": s.name,
+        "id": str(s.id),
+        "service_id": str(s.id),   # alias so mobile apps / clients reading service_id work correctly
+        "category_id": str(s.category_id), "name": s.name,
         "description": s.description, "base_price": s.base_price,
         "gst_percent": s.gst_percent, "duration_mins": s.duration_mins,
         "is_visible": s.is_visible, "sort_order": s.sort_order,

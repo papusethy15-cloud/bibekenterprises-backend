@@ -484,7 +484,11 @@ async def create_booking(
                 )
 
     # Fetch service for pricing/name (service_id is optional for chatbot/web bookings)
+    # Guard: treat empty string the same as None (mobile app may send "" when
+    # DomainService.serviceId was not populated from the API response).
     from app.models.service import Service
+    if payload.service_id is not None and payload.service_id.strip() == "":
+        payload.service_id = None
     service = None
     if payload.service_id:
         service = (await db.execute(select(Service).where(Service.id == UUID(payload.service_id)))).scalar_one_or_none()
