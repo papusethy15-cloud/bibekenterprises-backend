@@ -177,13 +177,37 @@ async def approve_commission(commission_id: UUID, payload: ApproveCommissionRequ
 @router.post("/{commission_id}/pay", summary="Mark commission paid [Admin]")
 async def pay_commission(commission_id: UUID, current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):
     from app.models.commission import Commission
+    from app.models.wallet import Wallet, WalletTransaction
     from datetime import datetime, timezone
     c = (await db.execute(select(Commission).where(Commission.id == commission_id))).scalar_one_or_none()
     if not c: raise HTTPException(404, "Commission not found")
     if c.status != "APPROVED": raise HTTPException(400, "Commission must be APPROVED before marking PAID")
-    c.status = "PAID"; c.payout_date = datetime.now(timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    c.status = "PAID"
+    c.payout_date = now
+
+    # Credit the technician's wallet
+    wallet = (await db.execute(
+        select(Wallet).where(Wallet.technician_id == c.technician_id)
+    )).scalar_one_or_none()
+    if wallet:
+        balance_before = wallet.balance or 0
+        wallet.balance = round(balance_before + (c.commission_amount or 0), 2)
+        wallet.total_earned = round((wallet.total_earned or 0) + (c.commission_amount or 0), 2)
+        db.add(WalletTransaction(
+            wallet_id=wallet.id,
+            transaction_type="CREDIT",
+            amount=c.commission_amount or 0,
+            balance_before=balance_before,
+            balance_after=wallet.balance,
+            description=f"Commission paid: {c.item_name or c.item_type or 'Commission'}",
+            reference_id=str(c.booking_id) if c.booking_id else None,
+            status="SUCCESS",
+        ))
+
     await db.commit()
-    return success_response(message="Commission marked as paid")
+    return success_response(data={"new_balance": round(wallet.balance, 2) if wallet else None}, message="Commission marked as paid and wallet credited")
 
 
 @router.post("/bulk-approve", summary="Bulk approve PENDING commissions [Admin]")
@@ -217,11 +241,36 @@ async def bulk_pay(
     items = (await db.execute(
         select(Commission).where(Commission.id.in_([UUID(i) for i in ids]), Commission.status == "APPROVED")
     )).scalars().all()
+    from app.models.wallet import Wallet, WalletTransaction
     now = datetime.now(timezone.utc)
+
+    # Group by technician so we do one wallet lookup per tech
+    tech_wallet_map: dict = {}
     for c in items:
-        c.status = "PAID"; c.payout_date = now
+        c.status = "PAID"
+        c.payout_date = now
+        tid = str(c.technician_id)
+        if tid not in tech_wallet_map:
+            w = (await db.execute(select(Wallet).where(Wallet.technician_id == c.technician_id))).scalar_one_or_none()
+            tech_wallet_map[tid] = w
+        wallet = tech_wallet_map[tid]
+        if wallet:
+            balance_before = wallet.balance or 0
+            wallet.balance = round(balance_before + (c.commission_amount or 0), 2)
+            wallet.total_earned = round((wallet.total_earned or 0) + (c.commission_amount or 0), 2)
+            db.add(WalletTransaction(
+                wallet_id=wallet.id,
+                transaction_type="CREDIT",
+                amount=c.commission_amount or 0,
+                balance_before=balance_before,
+                balance_after=wallet.balance,
+                description=f"Commission paid: {c.item_name or c.item_type or 'Commission'}",
+                reference_id=str(c.booking_id) if c.booking_id else None,
+                status="SUCCESS",
+            ))
+
     await db.commit()
-    return success_response(data={"updated": len(items)}, message=f"{len(items)} commissions marked paid")
+    return success_response(data={"updated": len(items)}, message=f"{len(items)} commissions marked paid and wallets credited")
 
 
 # ── Commission Groups ─────────────────────────────────────────────────────────

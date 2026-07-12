@@ -518,11 +518,27 @@ async def captain_earnings(
         )
         today_credit = float(credit_result.scalar() or 0)
 
+    # Commission amounts on hold (PENDING + APPROVED but not yet PAID → not in wallet yet)
+    from app.models.commission import Commission
+    comm_result = await db.execute(
+        select(
+            func.coalesce(func.sum(Commission.commission_amount).filter(Commission.status == "PENDING"),  0).label("pending"),
+            func.coalesce(func.sum(Commission.commission_amount).filter(Commission.status == "APPROVED"), 0).label("approved"),
+        ).where(Commission.technician_id == tech.id)
+    )
+    comm_row = comm_result.one()
+    pending_commission  = float(comm_row.pending  or 0)
+    approved_commission = float(comm_row.approved or 0)
+    commission_on_hold  = round(pending_commission + approved_commission, 2)
+
     return success_response(data={
-        "balance":        float(wallet.balance) if wallet else 0.0,
-        "today_earnings": today_credit,
-        "total_jobs":     tech.total_jobs,
-        "rating":         tech.rating,
+        "balance":              float(wallet.balance) if wallet else 0.0,
+        "today_earnings":       today_credit,
+        "total_jobs":           tech.total_jobs,
+        "rating":               tech.rating,
+        "commission_on_hold":   commission_on_hold,   # settled but not yet paid into wallet
+        "pending_commission":   round(pending_commission,  2),   # settled, awaiting admin approval
+        "approved_commission":  round(approved_commission, 2),   # approved, payout scheduled
     })
 
 
