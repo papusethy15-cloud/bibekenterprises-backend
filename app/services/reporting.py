@@ -57,11 +57,40 @@ async def build_gst_report(
             target["igst_amount"] = round(target["igst_amount"] + invoice.igst_amount, 2)
             target["total_amount"] = round(target["total_amount"] + invoice.total_amount, 2)
 
+    b2c = summary_by_type.get(InvoiceType.GST_B2C.value, {})
+    b2b = summary_by_type.get(InvoiceType.GST_B2B.value, {})
+    # Build line_items list — only GST invoices (not NON_GST)
+    gst_invoices = [inv for inv in invoices if inv.invoice_type != InvoiceType.NON_GST]
+
     return {
         "date_range": {"start_date": resolved_start.isoformat(), "end_date": resolved_end.isoformat()},
         "totals": totals,
         "by_type": summary_by_type,
         "monthly": [{"month": month, **values} for month, values in sorted(monthly.items())],
+        # Frontend-friendly flat keys
+        "total_invoices": b2c.get("invoice_count", 0) + b2b.get("invoice_count", 0),
+        "b2c_invoices": b2c.get("invoice_count", 0),
+        "b2b_invoices": b2b.get("invoice_count", 0),
+        "total_taxable": round(b2c.get("taxable_amount", 0) + b2b.get("taxable_amount", 0), 2),
+        "total_cgst": round(b2c.get("cgst_amount", 0) + b2b.get("cgst_amount", 0), 2),
+        "total_sgst": round(b2c.get("sgst_amount", 0) + b2b.get("sgst_amount", 0), 2),
+        "total_igst": round(b2c.get("igst_amount", 0) + b2b.get("igst_amount", 0), 2),
+        "line_items": [
+            {
+                "invoice_number": inv.invoice_number,
+                "date": inv.created_at.isoformat() if inv.created_at else None,
+                "customer_name": None,  # joined separately if needed
+                "gstin": inv.gstin,
+                "taxable_amount": round(inv.taxable_amount or 0, 2),
+                "cgst": round(inv.cgst_amount or 0, 2),
+                "sgst": round(inv.sgst_amount or 0, 2),
+                "igst": round(inv.igst_amount or 0, 2),
+                "total_tax": round((inv.cgst_amount or 0) + (inv.sgst_amount or 0) + (inv.igst_amount or 0), 2),
+                "invoice_total": round(inv.total_amount or 0, 2),
+                "type": inv.invoice_type.value if inv.invoice_type else "GST_B2C",
+            }
+            for inv in gst_invoices
+        ],
     }
 
 
@@ -125,6 +154,12 @@ async def build_revenue_report(
             "collection_rate": round((total_paid / total_invoiced) * 100, 2) if total_invoiced else 0.0,
         },
         "daily": [{"date": key, **value} for key, value in sorted(daily.items())],
+        # Frontend-friendly flat keys (Reports.tsx expects these)
+        "total_revenue": total_paid,
+        "total_bookings": len(bookings),
+        "completed_bookings": sum(1 for b in bookings if getattr(b, "status", "") in ("COMPLETED", "CLOSED", "SETTLED")),
+        "average_booking_value": round(total_paid / len(bookings), 2) if bookings else 0.0,
+        "breakdown": [{"date": key, "revenue": v["paid_amount"], "bookings": v["payment_count"], "avg_value": round(v["paid_amount"] / v["payment_count"], 2) if v["payment_count"] else 0} for key, v in sorted(daily.items())],
     }
 
 

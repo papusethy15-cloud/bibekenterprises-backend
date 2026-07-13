@@ -25,9 +25,18 @@ def _handle_report_range_error(exc: ValueError):
 async def revenue_report(
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
+    year: int | None = Query(None),
+    month: int | None = Query(None),
+    period: str | None = Query(None),
     current_user: dict = Depends(AnyStaff),
     db: AsyncSession = Depends(get_db),
 ):
+    # Convert year/month/period to date range if explicit dates not given
+    if not start_date and not end_date and year and month:
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        start_date = date(year, month, 1)
+        end_date = date(year, month, last_day)
     try:
         report = await build_revenue_report(db, start_date=start_date, end_date=end_date)
     except ValueError as exc:
@@ -39,9 +48,17 @@ async def revenue_report(
 async def gst_report(
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
+    year: int | None = Query(None),
+    month: int | None = Query(None),
     current_user: dict = Depends(AnyStaff),
     db: AsyncSession = Depends(get_db),
 ):
+    # Convert year/month to date range if explicit dates not given
+    if not start_date and not end_date and year and month:
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        start_date = date(year, month, 1)
+        end_date = date(year, month, last_day)
     try:
         report = await build_gst_report(db, start_date=start_date, end_date=end_date)
     except ValueError as exc:
