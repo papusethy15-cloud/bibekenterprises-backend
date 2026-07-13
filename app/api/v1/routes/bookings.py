@@ -2030,6 +2030,7 @@ async def commission_preview(
                 "commission_type": matched_rule.commission_type if matched_rule else None,
                 "rate": matched_rule.rate if matched_rule else None,
                 "commission_amount": comm,
+                "matched": matched_rule is not None,
                 "match_status": match_status,
             })
 
@@ -2043,8 +2044,16 @@ async def commission_preview(
             ), None)
             if matched_rule:
                 if matched_rule.commission_type == "PERCENTAGE":
-                    comm = round(pi.total_price * matched_rule.rate / 100, 2)
-                else:
+                    # OFFICE_STOCK: commission = rate% of profit (selling - cost)
+                    # MARKET_PURCHASE: technician keeps purchase cost; commission = rate% of selling price
+                    if src == "OFFICE_STOCK":
+                        purchase = pi.purchase_price if pi.purchase_price else 0
+                        profit = pi.unit_price - purchase
+                        profit_total = max(profit, 0) * pi.quantity
+                        comm = round(profit_total * matched_rule.rate / 100, 2)
+                    else:  # MARKET_PURCHASE
+                        comm = round(pi.total_price * matched_rule.rate / 100, 2)
+                else:  # FLAT
                     comm = round(matched_rule.rate * pi.quantity, 2)
                 match_status = "group"
             else:
@@ -2057,18 +2066,22 @@ async def commission_preview(
                 "name": pi.part_name,
                 "quantity": pi.quantity,
                 "unit_price": pi.unit_price,
+                "purchase_price": pi.purchase_price,
                 "total_price": pi.total_price,
                 "part_source": src,
                 "commission_type": matched_rule.commission_type if matched_rule else None,
                 "rate": matched_rule.rate if matched_rule else None,
                 "commission_amount": comm,
+                "matched": matched_rule is not None,
                 "match_status": match_status,
             })
 
+    total_commission = sum(item["commission_amount"] for item in line_items if item["commission_amount"] is not None)
     return success_response(data={
         "technician": {"id": str(tech.id), "name": tech.name, "user_id": str(tech.user_id)} if tech else None,
         "commission_group": {"id": str(group.id), "name": group.name} if group else None,
         "line_items": line_items,
+        "total_commission": round(total_commission, 2),
     })
 
 
@@ -2185,7 +2198,18 @@ async def settle_booking(
                             if (r.part_source_filter is None or r.part_source_filter == src)
                             and (r.part_name_match is None or r.part_name_match.lower() in pi.part_name.lower())), None)
             if matched:
-                comm = round(pi.total_price * matched.rate / 100, 2) if matched.commission_type == "PERCENTAGE" else round(matched.rate * pi.quantity, 2)
+                if matched.commission_type == "PERCENTAGE":
+                    # OFFICE_STOCK: commission = rate% of profit (selling price - cost)
+                    # MARKET_PURCHASE: technician keeps purchase cost; commission = rate% of selling price
+                    if src == "OFFICE_STOCK":
+                        purchase = pi.purchase_price if pi.purchase_price else 0
+                        profit = pi.unit_price - purchase
+                        profit_total = max(profit, 0) * pi.quantity
+                        comm = round(profit_total * matched.rate / 100, 2)
+                    else:  # MARKET_PURCHASE
+                        comm = round(pi.total_price * matched.rate / 100, 2)
+                else:  # FLAT
+                    comm = round(matched.rate * pi.quantity, 2)
             else:
                 comm = None
             line_items.append({"type": "PART", "name": pi.part_name, "quantity": pi.quantity,

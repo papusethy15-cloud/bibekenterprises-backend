@@ -340,22 +340,42 @@ async def bulk_pay(
 @router.get("/groups", summary="List commission groups [Admin]")
 async def list_groups(current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):
     from app.models.commission import CommissionGroup, CommissionGroupRule, CommissionGroupAssignment
+    from app.models.service import Service
     groups = (await db.execute(
         select(CommissionGroup).where(CommissionGroup.is_active == True).order_by(CommissionGroup.created_at.desc())
     )).scalars().all()
+
+    # Pre-load ALL service names in one query across all groups
+    all_rules_rows = (await db.execute(
+        select(CommissionGroupRule).where(CommissionGroupRule.group_id.in_([g.id for g in groups]))
+    )).scalars().all()
+    all_svc_ids = list({r.service_id for r in all_rules_rows if r.service_id})
+    svc_map: dict = {}
+    if all_svc_ids:
+        svcs = (await db.execute(select(Service).where(Service.id.in_(all_svc_ids)))).scalars().all()
+        svc_map = {str(s.id): s for s in svcs}
+    rules_by_group: dict = {}
+    for r in all_rules_rows:
+        rules_by_group.setdefault(str(r.group_id), []).append(r)
+
     result = []
     for g in groups:
-        rules = (await db.execute(select(CommissionGroupRule).where(CommissionGroupRule.group_id == g.id))).scalars().all()
         tech_count = (await db.execute(
             select(func.count(CommissionGroupAssignment.id)).where(CommissionGroupAssignment.group_id == g.id)
         )).scalar_one()
+        grules = rules_by_group.get(str(g.id), [])
         result.append({
             "id": str(g.id), "name": g.name, "description": g.description,
             "is_active": g.is_active, "technician_count": tech_count,
             "created_at": g.created_at.isoformat() if g.created_at else None,
-            "rules": [{"id": str(r.id), "service_id": str(r.service_id),
-                       "domain_id": str(r.domain_id) if r.domain_id else None,
-                       "commission_type": r.commission_type, "rate": r.rate} for r in rules]
+            "rules": [{
+                "id":              str(r.id),
+                "service_id":      str(r.service_id),
+                "service_name":    svc_map[str(r.service_id)].name if str(r.service_id) in svc_map else str(r.service_id),
+                "domain_id":       str(r.domain_id) if r.domain_id else None,
+                "commission_type": r.commission_type,
+                "rate":            r.rate,
+            } for r in grules]
         })
     return success_response(data=result)
 
@@ -379,20 +399,48 @@ async def create_group(payload: CreateGroupRequest, current_user: dict = Depends
 async def get_group(group_id: UUID, current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):
     from app.models.commission import CommissionGroup, CommissionGroupRule, CommissionGroupAssignment
     from app.models.technician import Technician
+    from app.models.service import Service
+    from app.models.domain import Domain
     g = (await db.execute(select(CommissionGroup).where(CommissionGroup.id == group_id))).scalar_one_or_none()
     if not g: raise HTTPException(404, "Group not found")
     rules = (await db.execute(select(CommissionGroupRule).where(CommissionGroupRule.group_id == group_id))).scalars().all()
+
+    # Enrich rules: resolve service names and domain names in one query each
+    svc_ids = list({r.service_id for r in rules if r.service_id})
+    dom_ids = list({r.domain_id  for r in rules if r.domain_id})
+    svc_map: dict = {}
+    dom_map: dict = {}
+    if svc_ids:
+        svcs = (await db.execute(select(Service).where(Service.id.in_(svc_ids)))).scalars().all()
+        svc_map = {str(s.id): s for s in svcs}
+    if dom_ids:
+        doms = (await db.execute(select(Domain).where(Domain.id.in_(dom_ids)))).scalars().all()
+        dom_map = {str(d.id): d for d in doms}
+
     assignments = (await db.execute(select(CommissionGroupAssignment).where(CommissionGroupAssignment.group_id == group_id))).scalars().all()
     tech_ids = [a.technician_id for a in assignments]
     techs = []
     if tech_ids:
         t_rows = (await db.execute(select(Technician).where(Technician.id.in_(tech_ids)))).scalars().all()
         techs = [{"id": str(t.id), "name": t.name, "mobile": t.mobile, "technician_code": t.technician_code} for t in t_rows]
+
+    def _enrich_rule(r):
+        svc = svc_map.get(str(r.service_id))
+        dom = dom_map.get(str(r.domain_id)) if r.domain_id else None
+        return {
+            "id":              str(r.id),
+            "service_id":      str(r.service_id),
+            "service_name":    svc.name       if svc else str(r.service_id),
+            "base_price":      svc.base_price if svc else None,
+            "domain_id":       str(r.domain_id) if r.domain_id else None,
+            "domain_name":     dom.name if dom else None,
+            "commission_type": r.commission_type,
+            "rate":            r.rate,
+        }
+
     return success_response(data={
         "id": str(g.id), "name": g.name, "description": g.description, "is_active": g.is_active,
-        "rules": [{"id": str(r.id), "service_id": str(r.service_id),
-                   "domain_id": str(r.domain_id) if r.domain_id else None,
-                   "commission_type": r.commission_type, "rate": r.rate} for r in rules],
+        "rules": [_enrich_rule(r) for r in rules],
         "technicians": techs,
     })
 
