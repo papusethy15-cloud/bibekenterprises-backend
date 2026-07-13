@@ -845,3 +845,113 @@ async def get_payment_receipt_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=receipt_{transaction.transaction_number}.pdf"},
     )
+
+
+# ── Razorpay transaction details endpoint ────────────────────────────────────
+@router.get("/razorpay/transactions", summary="Razorpay-only transaction history with gateway details [Admin]")
+async def razorpay_transactions(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    status: str = Query(None),
+    date_from: str = Query(None),
+    date_to: str = Query(None),
+    search: str = Query(None),
+    period: str = Query(None),  # weekly, monthly, yearly
+    current_user: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns only Razorpay transactions enriched with booking/customer reference and failure info."""
+    from datetime import datetime as dt, timedelta, timezone
+    from sqlalchemy import or_
+    from app.models.invoice import Invoice
+
+    query = (
+        select(PaymentTransaction, Booking, Customer, Invoice)
+        .outerjoin(Booking, Booking.id == PaymentTransaction.booking_id)
+        .outerjoin(Customer, Customer.id == Booking.customer_id)
+        .outerjoin(Invoice, Invoice.id == PaymentTransaction.invoice_id)
+        .where(
+            PaymentTransaction.is_active == True,
+            PaymentTransaction.method == PaymentMethod.RAZORPAY,
+        )
+    )
+
+    # Period shortcuts
+    now = dt.now(timezone.utc)
+    if period == "weekly":
+        query = query.where(PaymentTransaction.created_at >= now - timedelta(days=7))
+    elif period == "monthly":
+        query = query.where(PaymentTransaction.created_at >= now - timedelta(days=30))
+    elif period == "yearly":
+        query = query.where(PaymentTransaction.created_at >= now - timedelta(days=365))
+
+    if status:
+        try:
+            query = query.where(PaymentTransaction.status == PaymentStatus(status))
+        except Exception:
+            pass
+    if date_from:
+        try: query = query.where(PaymentTransaction.created_at >= dt.fromisoformat(date_from))
+        except Exception: pass
+    if date_to:
+        try: query = query.where(PaymentTransaction.created_at <= dt.fromisoformat(date_to))
+        except Exception: pass
+    if search:
+        s = f"%{search}%"
+        query = query.where(or_(
+            PaymentTransaction.transaction_number.ilike(s),
+            PaymentTransaction.provider_payment_id.ilike(s),
+            PaymentTransaction.provider_order_id.ilike(s),
+            Booking.booking_number.ilike(s),
+            Invoice.invoice_number.ilike(s),
+        ))
+
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+
+    # Aggregate stats (all matching, not just page)
+    stats_q = (
+        select(
+            func.sum(PaymentTransaction.amount).filter(PaymentTransaction.status == PaymentStatus.SUCCESS).label("total_success"),
+            func.sum(PaymentTransaction.amount).filter(PaymentTransaction.status == PaymentStatus.FAILED).label("total_failed"),
+            func.count(PaymentTransaction.id).filter(PaymentTransaction.status == PaymentStatus.SUCCESS).label("count_success"),
+            func.count(PaymentTransaction.id).filter(PaymentTransaction.status == PaymentStatus.FAILED).label("count_failed"),
+            func.count(PaymentTransaction.id).label("count_total"),
+        )
+        .select_from(PaymentTransaction)
+        .where(PaymentTransaction.is_active == True, PaymentTransaction.method == PaymentMethod.RAZORPAY)
+    )
+    stat_row = (await db.execute(stats_q)).one()
+
+    rows = (
+        await db.execute(
+            query.order_by(PaymentTransaction.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).all()
+
+    def _rzp_item(row):
+        txn, bk, cust, inv = row
+        base = _payment_summary(txn, bk, cust.name if cust else None, inv.invoice_number if inv else None)
+        base["razorpay_order_id"] = txn.provider_order_id
+        base["razorpay_payment_id"] = txn.provider_payment_id
+        base["failed"] = txn.status == PaymentStatus.FAILED
+        base["failure_reason"] = txn.notes if txn.status == PaymentStatus.FAILED else None
+        base["customer_mobile"] = cust.mobile if cust else None
+        base["booking_number"] = bk.booking_number if bk else None
+        base["invoice_number"] = inv.invoice_number if inv else None
+        return base
+
+    return success_response(data={
+        "items": [_rzp_item(r) for r in rows],
+        "total": total,
+        "page": page,
+        "pages": (total + per_page - 1) // per_page,
+        "stats": {
+            "total_collected": float(stat_row.total_success or 0),
+            "total_failed_amount": float(stat_row.total_failed or 0),
+            "success_count": stat_row.count_success or 0,
+            "failed_count": stat_row.count_failed or 0,
+            "total_count": stat_row.count_total or 0,
+        },
+    })

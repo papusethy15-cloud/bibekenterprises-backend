@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from uuid import UUID
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from app.core.database import get_db
 from app.api.deps import AdminOnly, AnyAuthenticated
@@ -27,12 +27,20 @@ class CreateCouponRequest(BaseModel):
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     domain_id: Optional[str] = None  # NULL = global coupon (valid on all domains)
+    # Advanced targeting
+    customer_mobile_numbers: Optional[List[str]] = None  # restrict to specific customers
+    service_ids: Optional[List[str]] = None              # restrict to specific services
+    category_ids: Optional[List[str]] = None             # restrict to specific categories
+    per_customer_limit: Optional[int] = None             # max uses per customer
 
 
 class ValidateCouponRequest(BaseModel):
     code: str
     order_amount: float
-    domain_id: Optional[str] = None  # website sends its own domain_id for scoped validation
+    domain_id: Optional[str] = None       # website sends its own domain_id for scoped validation
+    customer_mobile: Optional[str] = None  # used to check customer-specific restriction
+    service_ids: Optional[List[str]] = None    # service IDs in the booking for restriction check
+    category_ids: Optional[List[str]] = None   # category IDs in the booking for restriction check
 
 
 def _coupon_dict(c, domain_name: str = None) -> dict:
@@ -51,6 +59,10 @@ def _coupon_dict(c, domain_name: str = None) -> dict:
         "is_active": c.is_active,
         "domain_id": str(c.domain_id) if c.domain_id else None,
         "domain_name": domain_name,
+        "customer_mobile_numbers": c.customer_mobile_numbers or [],
+        "service_ids": [str(x) for x in (c.service_ids or [])],
+        "category_ids": [str(x) for x in (c.category_ids or [])],
+        "per_customer_limit": c.per_customer_limit,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
 
@@ -126,6 +138,10 @@ async def create_coupon(
         valid_until=payload.valid_until,
         is_active=True,
         domain_id=domain_id,
+        customer_mobile_numbers=payload.customer_mobile_numbers or None,
+        service_ids=payload.service_ids or None,
+        category_ids=payload.category_ids or None,
+        per_customer_limit=payload.per_customer_limit,
     )
     db.add(coupon)
     await db.commit()
@@ -187,6 +203,26 @@ async def validate_coupon(
     if payload.order_amount < (coupon.min_order_amount or 0):
         raise HTTPException(400, f"Minimum order amount is \u20b9{coupon.min_order_amount:.0f}")
 
+    # Customer-specific restriction check
+    if coupon.customer_mobile_numbers:
+        if not payload.customer_mobile or payload.customer_mobile not in coupon.customer_mobile_numbers:
+            raise HTTPException(400, "This coupon is not valid for your account")
+
+    # Service restriction check
+    if coupon.service_ids and payload.service_ids:
+        # At least one service in booking must match
+        coupon_srv_set = {str(s) for s in coupon.service_ids}
+        booking_srv_set = set(payload.service_ids or [])
+        if not coupon_srv_set.intersection(booking_srv_set):
+            raise HTTPException(400, "This coupon is not applicable for the selected services")
+
+    # Category restriction check
+    if coupon.category_ids and payload.category_ids:
+        coupon_cat_set = {str(c) for c in coupon.category_ids}
+        booking_cat_set = set(payload.category_ids or [])
+        if not coupon_cat_set.intersection(booking_cat_set):
+            raise HTTPException(400, "This coupon is not applicable for the selected service category")
+
     if coupon.discount_type == "FLAT":
         discount = coupon.discount_value
     else:
@@ -203,6 +239,9 @@ async def validate_coupon(
         "discount_amount": discount,
         "description": coupon.description,
         "is_global": coupon.domain_id is None,
+        "has_customer_restriction": bool(coupon.customer_mobile_numbers),
+        "has_service_restriction": bool(coupon.service_ids),
+        "has_category_restriction": bool(coupon.category_ids),
     }, message="Coupon valid")
 
 
@@ -228,6 +267,10 @@ async def update_coupon(
     c.valid_from = payload.valid_from
     c.valid_until = payload.valid_until
     c.domain_id = UUID(payload.domain_id) if payload.domain_id else None
+    c.customer_mobile_numbers = payload.customer_mobile_numbers or None
+    c.service_ids = payload.service_ids or None
+    c.category_ids = payload.category_ids or None
+    c.per_customer_limit = payload.per_customer_limit
     await db.commit()
     await db.refresh(c)
     return success_response(data=_coupon_dict(c), message="Coupon updated")

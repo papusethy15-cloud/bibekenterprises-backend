@@ -1,6 +1,6 @@
 import uuid
 from sqlalchemy import Column, String, Float, Boolean, Text, ForeignKey, DateTime, Integer
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.sql import func
 from app.models.base import Base
 
@@ -21,6 +21,15 @@ class Coupon(Base):
     valid_from = Column(DateTime(timezone=True))
     valid_until = Column(DateTime(timezone=True))
     is_active = Column(Boolean, default=True)
+    # Advanced targeting — NULL = no restriction (applies to all)
+    # customer_mobile_numbers: only these customers can use the coupon
+    customer_mobile_numbers = Column(ARRAY(String), nullable=True)
+    # service_ids: only apply when one of these services is in the booking
+    service_ids = Column(ARRAY(UUID(as_uuid=False)), nullable=True)
+    # category_ids: only apply when booking contains a service from one of these categories
+    category_ids = Column(ARRAY(UUID(as_uuid=False)), nullable=True)
+    # per_customer_limit: how many times one customer can use this coupon
+    per_customer_limit = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
