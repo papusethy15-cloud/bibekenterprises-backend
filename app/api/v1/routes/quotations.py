@@ -608,6 +608,26 @@ async def submit_quotation(
                     ))
         except Exception as _ce:
             import logging; logging.getLogger(__name__).warning(f"Customer FCM on submit failed: {_ce}")
+    # FCM push to all Admin/CCO users so they get notified even when the dashboard is closed
+    try:
+        from app.models.user import User as _AdminUser
+        from app.utils.fcm import send_simple_push as _push
+        _admin_users = (await db.execute(
+            select(_AdminUser).where(
+                _AdminUser.role.in_(["SUPER_ADMIN", "ADMIN", "CCO"]),
+                _AdminUser.fcm_token.isnot(None),
+                _AdminUser.is_active == True,
+            )
+        )).scalars().all()
+        for _au in _admin_users:
+            track_task(_push(
+                fcm_token=_au.fcm_token,
+                title="New Quotation Submitted \U0001f4cb",
+                body=f"Booking {_submit_bnum} — technician has submitted a quotation for approval.",
+                data={"type": "QUOTATION_SUBMITTED", "booking_id": str(quotation.booking_id), "quotation_id": str(quotation.id), "booking_number": _submit_bnum},
+            ))
+    except Exception as _ae:
+        import logging; logging.getLogger(__name__).warning(f"Admin/CCO FCM on submit failed: {_ae}")
     return success_response(data=_quotation_summary(quotation), message="Quotation submitted successfully")
 
 
