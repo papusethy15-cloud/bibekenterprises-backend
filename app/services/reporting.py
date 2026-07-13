@@ -75,6 +75,11 @@ async def build_gst_report(
         "total_cgst": round(b2c.get("cgst_amount", 0) + b2b.get("cgst_amount", 0), 2),
         "total_sgst": round(b2c.get("sgst_amount", 0) + b2b.get("sgst_amount", 0), 2),
         "total_igst": round(b2c.get("igst_amount", 0) + b2b.get("igst_amount", 0), 2),
+        "total_tax": round(
+            b2c.get("cgst_amount", 0) + b2c.get("sgst_amount", 0) + b2c.get("igst_amount", 0) +
+            b2b.get("cgst_amount", 0) + b2b.get("sgst_amount", 0) + b2b.get("igst_amount", 0),
+            2
+        ),
         "line_items": [
             {
                 "invoice_number": inv.invoice_number,

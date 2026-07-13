@@ -113,6 +113,47 @@ async def mark_all_read(
     return success_response(message="All notifications marked as read")
 
 
+# ── GET /notifications/admin-log [Admin/CCO] ────────────────────────────────
+@router.get("/admin-log", summary="All notifications log [Admin/CCO]")
+async def admin_notification_log(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25),
+    current_user: dict = Depends(AdminOrCCO),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns ALL notifications in the system for admin oversight, newest first."""
+    from app.models.notification import Notification
+    from app.models.user import User
+    base_q = select(Notification).order_by(Notification.created_at.desc())
+    total = (await db.execute(select(func.count()).select_from(base_q.subquery()))).scalar_one()
+    notifs = (await db.execute(
+        base_q.offset((page - 1) * per_page).limit(per_page)
+    )).scalars().all()
+    # Resolve user info for each notification
+    user_ids = list({n.user_id for n in notifs})
+    users = {}
+    if user_ids:
+        rows = (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+        users = {u.id: u for u in rows}
+    items = []
+    for n in notifs:
+        u = users.get(n.user_id)
+        items.append({
+            **_serialize(n),
+            "recipient_name": u.name if u else None,
+            "recipient_role": u.role.value if u and u.role else None,
+            "recipient_mobile": u.mobile if u else None,
+        })
+    return success_response(data={
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+        "has_more": (page * per_page) < total,
+    })
+
+
 # ── POST /notifications/send [Admin/CCO] ─────────────────────────────────────
 class SendNotificationRequest(BaseModel):
     user_id: str
