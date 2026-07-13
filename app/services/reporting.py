@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.orm import joinedload
 from app.models.booking import Booking
 from app.models.customer import Customer
 from app.models.invoice import Invoice, InvoiceType
