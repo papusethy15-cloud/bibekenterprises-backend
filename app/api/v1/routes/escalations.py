@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from uuid import UUID
+from app.utils.timezone import now_ist
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
@@ -168,7 +169,7 @@ async def patch_escalation(
             raise HTTPException(400, f"Invalid status: {payload.status!r}")
         esc.status = new_status
         if new_status == EscalationStatus.RESOLVED and not esc.resolved_at:
-            esc.resolved_at = datetime.utcnow()
+            esc.resolved_at = now_ist()
             esc.resolved_by = UUID(current_user["user_id"])
         if new_status == EscalationStatus.ESCALATED:
             esc.escalation_level = (getattr(esc, "escalation_level", 1) or 1) + 1
@@ -215,7 +216,7 @@ async def resolve_escalation(
         raise HTTPException(status_code=404, detail="Escalation not found")
     esc.status = EscalationStatus.RESOLVED
     esc.resolved_by = UUID(current_user["user_id"])
-    esc.resolved_at = datetime.utcnow()
+    esc.resolved_at = now_ist()
     esc.resolution_notes = payload.notes
     await db.commit()
     return success_response(message="Escalation resolved")

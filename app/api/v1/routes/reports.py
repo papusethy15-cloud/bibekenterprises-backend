@@ -1,3 +1,4 @@
+from app.utils.timezone import ist_midnight_utc, ist_end_of_day_utc
 from datetime import date
 import sqlalchemy as sa
 
@@ -145,8 +146,8 @@ async def technician_report(
         from dateutil.relativedelta import relativedelta
         start_date = end_date - relativedelta(months=1)
 
-    start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-    end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+    start_dt = ist_midnight_utc(start_date)
+    end_dt = ist_end_of_day_utc(end_date)
 
     # Base technician query
     tech_q = select(Technician).where(Technician.is_active == True)

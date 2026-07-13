@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc
+from app.utils.timezone import now_ist
 from datetime import datetime, timedelta
 from app.core.database import get_db
 from app.api.deps import AnyStaff
@@ -37,7 +38,7 @@ async def dashboard_kpis(
     from app.models.customer import Customer
     from app.models.technician import Technician
 
-    now = datetime.utcnow()
+    now = now_ist()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
@@ -347,7 +348,7 @@ async def revenue_analytics(
 ):
     from app.models.booking import Booking, BookingStatus
     days = 30 if period == "monthly" else (7 if period == "weekly" else 14)
-    since = datetime.utcnow() - timedelta(days=days)
+    since = now_ist() - timedelta(days=days)
     try:
         result = await db.execute(
             select(
@@ -372,7 +373,7 @@ async def booking_analytics(
     db: AsyncSession = Depends(get_db),
 ):
     from app.models.booking import Booking, BookingStatus
-    since = datetime.utcnow() - timedelta(days=30)
+    since = now_ist() - timedelta(days=30)
     try:
         rows = (await db.execute(
             select(Booking.status, func.count(Booking.id))
@@ -410,7 +411,7 @@ async def customer_analytics(
     db: AsyncSession = Depends(get_db),
 ):
     from app.models.customer import Customer
-    since = datetime.utcnow() - timedelta(days=30)
+    since = now_ist() - timedelta(days=30)
     try:
         new_this_month = (await db.execute(
             select(func.count()).select_from(Customer).where(Customer.created_at >= since)

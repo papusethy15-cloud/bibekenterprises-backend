@@ -1,5 +1,7 @@
 import asyncio
 import logging
+
+from app.utils.timezone import now_ist, ist_invoice_suffix
 from datetime import datetime
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -33,7 +35,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 def generate_invoice_number() -> str:
-    return "INV" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")[-12:]
+    return "INV" + ist_invoice_suffix()[-12:]
 
 
 async def _get_customer_id(db: AsyncSession, user_id: str):
@@ -557,7 +559,7 @@ def _build_invoice_pdf(invoice, booking, customer, domain_profile, services, par
     if city_line: addr_parts.append(city_line)
 
     copyright_txt = ((dp.copyright_text if dp else None)
-                     or f"(c) {datetime.utcnow().year} {biz_name}. All rights reserved.")
+                     or f"(c) {now_ist().year} {biz_name}. All rights reserved.")
 
     # ── Document setup ────────────────────────────────────────────────────────
     buf = BytesIO()
@@ -1082,7 +1084,7 @@ async def send_invoice_email(
     db: AsyncSession = Depends(get_db),
 ):
     invoice = await _get_invoice_or_404(db, invoice_id)
-    invoice.sent_email_at = datetime.utcnow()
+    invoice.sent_email_at = now_ist()
     await db.commit()
     return success_response(
         data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": invoice.sent_email_at.isoformat()},
@@ -1098,7 +1100,7 @@ async def send_invoice_whatsapp(
     db: AsyncSession = Depends(get_db),
 ):
     invoice = await _get_invoice_or_404(db, invoice_id)
-    invoice.sent_whatsapp_at = datetime.utcnow()
+    invoice.sent_whatsapp_at = now_ist()
     await db.commit()
     return success_response(
         data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": invoice.sent_whatsapp_at.isoformat()},

@@ -1,3 +1,4 @@
+from app.utils.timezone import now_ist
 from datetime import datetime
 from uuid import UUID
 
@@ -142,7 +143,7 @@ async def update_location(
         speed=payload.speed,
         heading=payload.heading,
         source=payload.source,
-        recorded_at=payload.recorded_at or datetime.utcnow(),
+        recorded_at=payload.recorded_at or now_ist(),
     )
     db.add(location)
     await db.flush()

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from uuid import UUID
+from app.utils.timezone import now_ist
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
@@ -55,7 +56,7 @@ async def purchase_amc(payload: PurchaseAMCRequest, current_user: dict = Depends
     from datetime import timedelta
     plan = (await db.execute(select(AMCPlan).where(AMCPlan.id == UUID(payload.plan_id)))).scalar_one_or_none()
     if not plan: raise HTTPException(status_code=404, detail="Plan not found")
-    start = datetime.fromisoformat(payload.start_date) if payload.start_date else datetime.utcnow()
+    start = datetime.fromisoformat(payload.start_date) if payload.start_date else now_ist()
     end = start.replace(month=start.month + plan.duration_months if start.month + plan.duration_months <= 12
                         else ((start.month + plan.duration_months) % 12), year=start.year + (start.month + plan.duration_months - 1) // 12)
     sub = AMCSubscription(customer_id=UUID(payload.customer_id), plan_id=UUID(payload.plan_id),
@@ -88,7 +89,7 @@ async def schedule_visit(payload: AMCVisitRequest, current_user: dict = Depends(
 async def renewals_due(days: int = Query(30), current_user: dict = Depends(AdminOrCCO), db: AsyncSession = Depends(get_db)):
     from app.models.amc import AMCSubscription
     from datetime import timedelta
-    cutoff = datetime.utcnow() + timedelta(days=days)
+    cutoff = now_ist() + timedelta(days=days)
     items = (await db.execute(select(AMCSubscription).where(AMCSubscription.end_date <= cutoff,
                                                              AMCSubscription.is_active == True))).scalars().all()
     return success_response(data=[{"id": str(s.id), "customer_id": str(s.customer_id),

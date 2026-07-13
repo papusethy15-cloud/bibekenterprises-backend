@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from uuid import UUID
 from typing import Optional, List
+from app.utils.timezone import now_ist
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -175,7 +176,7 @@ async def _enrich(a, db) -> dict:
         except Exception:
             pass
     tz = a.warranty_expiry.tzinfo if a.warranty_expiry else None
-    now = datetime.utcnow()
+    now = now_ist()
     under_warranty = bool(a.warranty_expiry and a.warranty_expiry.replace(tzinfo=None) > now)
     return _appliance_row(a, brand_name, type_name, cat_name, under_warranty, customer_name, customer_mobile)
 
@@ -691,7 +692,7 @@ async def appliance_warranty(
     from app.models.appliance import CustomerAppliance
     a = (await db.execute(select(CustomerAppliance).where(CustomerAppliance.id == appliance_id))).scalar_one_or_none()
     if not a: raise HTTPException(404, "Appliance not found")
-    now = datetime.utcnow()
+    now = now_ist()
     is_valid  = bool(a.warranty_expiry and a.warranty_expiry.replace(tzinfo=None) > now)
     days_left = max(0, (a.warranty_expiry.replace(tzinfo=None) - now).days) if a.warranty_expiry else None
     return success_response(data={

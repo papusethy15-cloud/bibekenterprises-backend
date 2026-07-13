@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+from app.utils.timezone import now_ist, ist_invoice_suffix
 from datetime import datetime
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -63,11 +64,11 @@ async def _get_razorpay_keys(db: AsyncSession) -> tuple[str, str]:
     return key_id, key_secret
 
 def generate_transaction_number() -> str:
-    return "PAY" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")[-12:]
+    return "PAY" + ist_invoice_suffix()[-12:]
 
 
 def generate_provider_order_id() -> str:
-    return "ORD" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")[-12:]
+    return "ORD" + ist_invoice_suffix()[-12:]
 
 
 async def _get_customer_id(db: AsyncSession, user_id: str):
@@ -144,7 +145,7 @@ async def _apply_invoice_payment_state(db: AsyncSession, invoice: Invoice):
         invoice.status = InvoiceStatus.PARTIALLY_PAID
     else:
         invoice.status = InvoiceStatus.PAID
-        invoice.paid_at = datetime.utcnow()
+        invoice.paid_at = now_ist()
 
 
 def _payment_summary(transaction: PaymentTransaction, booking=None, customer_name: str = None, invoice_number: str = None):
@@ -273,7 +274,7 @@ async def verify_payment(
     transaction.provider_signature = payload.provider_signature
     transaction.status = PaymentStatus.SUCCESS
     transaction.verified_by = UUID(current_user["user_id"])
-    transaction.paid_at = datetime.utcnow()
+    transaction.paid_at = now_ist()
     if payload.amount is not None:
         transaction.amount = payload.amount
     if payload.notes:
@@ -327,7 +328,7 @@ async def cash_payment(
     if is_pay_later and not due_collect_at:
         raise HTTPException(status_code=400, detail="due_collect_at is required when is_pay_later is set — pick the date/time to remind for collection.")
     txn_status   = PaymentStatus.PENDING if is_pay_later else PaymentStatus.SUCCESS
-    txn_paid_at  = None if is_pay_later else datetime.utcnow()
+    txn_paid_at  = None if is_pay_later else now_ist()
     txn_method   = PaymentMethod.PAY_LATER if is_pay_later else PaymentMethod.CASH
 
     role = current_user["role"]
@@ -484,7 +485,7 @@ async def bank_transfer_payment(
         amount=payload.amount,
         reference_number=payload.reference_number,
         notes=payload.notes,
-        paid_at=datetime.utcnow(),
+        paid_at=now_ist(),
     )
     db.add(transaction)
     await db.flush()
@@ -673,10 +674,10 @@ async def mark_pay_later_collected(
 
     txn.status = PaymentStatus.SUCCESS
     txn.method = PaymentMethod.CASH  # collected as cash
-    txn.paid_at = datetime.utcnow()
+    txn.paid_at = now_ist()
     txn.verified_by = UUID(current_user["user_id"])
     txn.cash_collection_status = CashCollectionStatus.COLLECTED
-    txn.notes = (txn.notes or "") + f" [Marked collected by CCO {current_user['user_id']} on {datetime.utcnow().date()}]"
+    txn.notes = (txn.notes or "") + f" [Marked collected by CCO {current_user['user_id']} on {now_ist().date()}]"
 
     invoice = await _get_invoice_or_404(db, txn.invoice_id)
 
@@ -730,7 +731,7 @@ async def void_pay_later(
 
     txn.status = PaymentStatus.CANCELLED  # type: ignore[attr-defined]
     txn.is_active = False
-    txn.notes = ((txn.notes or "") + f" [Voided by CCO {current_user['user_id']} on {datetime.utcnow().date()} — payment already collected via other method]")[:1000]
+    txn.notes = ((txn.notes or "") + f" [Voided by CCO {current_user['user_id']} on {now_ist().date()} — payment already collected via other method]")[:1000]
 
     await db.commit()
     return success_response(

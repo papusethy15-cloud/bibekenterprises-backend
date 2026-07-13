@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from uuid import UUID
+from app.utils.timezone import now_ist
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
@@ -59,7 +60,7 @@ async def create_claim(payload: WarrantyClaimRequest, current_user: dict = Depen
     from app.models.warranty import WarrantyClaim, Warranty, WarrantyStatus
     w = (await db.execute(select(Warranty).where(Warranty.id == UUID(payload.warranty_id)))).scalar_one_or_none()
     if not w: raise HTTPException(status_code=404, detail="Warranty not found")
-    if w.expiry_date < datetime.utcnow(): raise HTTPException(status_code=400, detail="Warranty has expired")
+    if w.expiry_date < now_ist(): raise HTTPException(status_code=400, detail="Warranty has expired")
     claim = WarrantyClaim(warranty_id=UUID(payload.warranty_id), claimed_by=UUID(current_user["user_id"]),
                           description=payload.description,
                           booking_id=UUID(payload.booking_id) if payload.booking_id else None)

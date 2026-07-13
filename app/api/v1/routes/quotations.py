@@ -1,5 +1,6 @@
 import asyncio
 from app.core.background_tasks import track_task
+from app.utils.timezone import now_ist
 from datetime import datetime, timedelta
 from typing import Optional
 from pydantic import BaseModel
@@ -45,7 +46,7 @@ EDITABLE_STATUSES = {QuotationStatus.DRAFT, QuotationStatus.REJECTED, QuotationS
 
 
 def generate_quotation_number() -> str:
-    return "QTN" + datetime.utcnow().strftime("%Y%m%d%H%M%S%f")[-12:]
+    return "QTN" + now_ist().strftime("%Y%m%d%H%M%S%f")[-12:]
 
 
 async def _get_customer_id(db: AsyncSession, user_id: str):
@@ -549,7 +550,7 @@ async def submit_quotation(
     if quotation.status not in EDITABLE_STATUSES:
         raise HTTPException(status_code=400, detail="Quotation is not in a submittable state")
     quotation.status = QuotationStatus.SUBMITTED
-    quotation.submitted_at = datetime.utcnow()
+    quotation.submitted_at = now_ist()
     notes = (payload.notes if payload and payload.notes else None) or "Quotation submitted"
     await _add_status_log(db, quotation, current_user["user_id"], notes)
     # Explicit booking query — async sessions don't support lazy relationship loading
@@ -640,7 +641,7 @@ async def approve_quotation(
             detail="Cannot approve quotation: no technician assigned to this booking yet. Assign a technician first."
         )
     quotation.status = QuotationStatus.APPROVED
-    quotation.approved_at = datetime.utcnow()
+    quotation.approved_at = now_ist()
     quotation.approved_by = UUID(current_user["user_id"])
     _PRE_WORK_STATUSES = {
         BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ASSIGNED,
@@ -1502,7 +1503,7 @@ async def add_quotation_appliance(
         )).mappings().first()
 
         if booking:
-            cutoff = datetime.utcnow() - timedelta(days=30)
+            cutoff = now_ist() - timedelta(days=30)
             prev = (await db.execute(
                 sa_text("""
                     SELECT b.id, b.booking_number, b.scheduled_date, b.service_name,
@@ -1641,7 +1642,7 @@ async def mark_repeat_complaint(
     quotation = await _get_quotation_or_404(db, quotation_id)
 
     label = payload.appliance_label.strip()
-    confirmed_at = datetime.utcnow() if payload.is_repeat else None
+    confirmed_at = now_ist() if payload.is_repeat else None
 
     # Update quotation_appliances row
     await db.execute(
@@ -1756,7 +1757,7 @@ async def check_repeat_complaints(
     for the same appliance within the last 30 days (repeat complaint detection).
     Returns list of appliances with repeat_detected flag and previous booking info.
     """
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = now_ist() - timedelta(days=30)
     booking = (await db.execute(
         sa_text("SELECT id FROM bookings WHERE id=:bid"),
         {"bid": str(quotation_id)}  # quotation_id used for context, not needed here
@@ -2081,7 +2082,7 @@ def _build_quotation_pdf(quotation, booking, customer, domain_profile, services,
     if dp.get("office_pincode"): city_line += f" - {dp['office_pincode']}"
     if city_line: addr_parts.append(city_line)
     copyright_txt = (dp.get("copyright_text") or
-                     f"(c) {_dt.datetime.utcnow().year} {biz_name}. All rights reserved.")
+                     f"(c) {_dt.now_ist().year} {biz_name}. All rights reserved.")
 
     # ── Customer info ─────────────────────────────────────────────────────────
     cust_name   = (getattr(customer, "name", None) or

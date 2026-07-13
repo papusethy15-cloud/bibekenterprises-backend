@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Float, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -17,4 +17,4 @@ class TrackingLocation(BaseModel):
     speed = Column(Float, nullable=True)
     heading = Column(Float, nullable=True)
     source = Column(String(50), default="MOBILE_APP", nullable=False)
-    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    recorded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

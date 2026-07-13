@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from typing import Optional
+from app.utils.timezone import now_ist
 from datetime import date, datetime, timezone, timedelta
 
 from app.core.database import get_db
@@ -251,7 +252,7 @@ async def update_location(
         latitude=payload.lat,
         longitude=payload.lng,
         source="captain_app",
-        recorded_at=datetime.utcnow(),  # naive UTC — column is TIMESTAMP WITHOUT TIME ZONE
+        recorded_at=now_ist(),  # IST-aware timestamp
     )
     db.add(location)
     await db.commit()
