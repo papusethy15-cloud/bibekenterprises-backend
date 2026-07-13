@@ -232,6 +232,7 @@ async def approve_commission(commission_id: UUID, payload: ApproveCommissionRequ
     from app.models.commission import Commission
     c = (await db.execute(select(Commission).where(Commission.id == commission_id))).scalar_one_or_none()
     if not c: raise HTTPException(404, "Commission not found")
+    if c.status != "PENDING": raise HTTPException(400, f"Commission is already {c.status}; only PENDING commissions can be approved")
     c.status = "APPROVED"; c.notes = payload.notes
     await db.commit()
     return success_response(message="Commission approved")
@@ -244,6 +245,7 @@ async def pay_commission(commission_id: UUID, current_user: dict = Depends(Admin
     from datetime import datetime, timezone
     c = (await db.execute(select(Commission).where(Commission.id == commission_id))).scalar_one_or_none()
     if not c: raise HTTPException(404, "Commission not found")
+    if c.status == "PAID": raise HTTPException(400, "Commission is already PAID — wallet was already credited; cannot pay again")
     if c.status != "APPROVED": raise HTTPException(400, "Commission must be APPROVED before marking PAID")
 
     now = datetime.now(timezone.utc)

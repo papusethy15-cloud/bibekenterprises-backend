@@ -2334,7 +2334,7 @@ async def settle_booking(
                 booking_id=booking.id,
                 base_amount=item["total_price"],
                 commission_amount=item["commission_amount"],
-                status="APPROVED",
+                status="PENDING",  # Wallet credited only after admin confirms payment on Commissions page
                 item_type=item["type"],
                 item_name=item["name"],
                 item_quantity=item["quantity"],
@@ -2342,26 +2342,8 @@ async def settle_booking(
                 notes=f"Settled: {item['commission_type']} {item['rate']}% on {item['name']}" if item["rate"] else f"Manual override: {item['commission_amount']}",
             )
             db.add(c)
-
-        # Credit wallet — get or create (look up by technician_id first, fallback to user_id)
-        wallet = (await db.execute(select(Wallet).where(Wallet.technician_id == tech.id))).scalar_one_or_none()
-        if not wallet:
-            wallet = Wallet(technician_id=tech.id, user_id=tech.user_id, balance=0.0, total_earned=0.0, total_withdrawn=0.0)
-            db.add(wallet)
-            await db.flush()
-        balance_before = wallet.balance or 0
-        wallet.balance = balance_before + total_commission
-        wallet.total_earned = (wallet.total_earned or 0) + total_commission
-        txn = WalletTransaction(
-            wallet_id=wallet.id,
-            transaction_type="CREDIT",
-            amount=total_commission,
-            balance_before=balance_before,
-            balance_after=wallet.balance,
-            reference_id=str(booking.id),
-            description=f"Commission for booking {booking.booking_number}. {payload.notes or ''}".strip(),
-        )
-        db.add(txn)
+        # NOTE: Wallet is NOT credited here. The technician's wallet is credited
+        # only when admin clicks "Mark Paid" (Confirm Payment) on the Commissions page.
 
     # Mark booking CLOSED
     booking.status = BookingStatus.CLOSED
