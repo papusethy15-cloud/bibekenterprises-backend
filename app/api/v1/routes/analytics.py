@@ -141,30 +141,41 @@ async def dashboard_kpis(
         status_chart = {}
 
     # ── Monthly booking trend — last 6 months ─────────────────────────────
+    # NOTE: to_char() with GROUP BY fails in asyncpg (parameterized string not
+    # recognized as same expression). Use date_trunc('month') + Python formatting.
     monthly_trend = []
     try:
+        month_trunc = func.date_trunc("month", Booking.created_at)
         rows = (await db.execute(
             select(
-                func.to_char(Booking.created_at, "YYYY-MM").label("month"),
+                month_trunc.label("month_dt"),
                 func.count(Booking.id).label("total"),
             )
             .where(Booking.created_at >= since_6m)
-            .group_by(func.to_char(Booking.created_at, "YYYY-MM"))
-            .order_by(func.to_char(Booking.created_at, "YYYY-MM"))
+            .group_by(month_trunc)
+            .order_by(month_trunc)
         )).all()
-        # "Completed" in monthly trend = all terminal revenue statuses
         comp_rows = (await db.execute(
             select(
-                func.to_char(Booking.created_at, "YYYY-MM").label("month"),
+                month_trunc.label("month_dt"),
                 func.count(Booking.id).label("completed"),
             )
             .where(and_(revenue_filter(), Booking.created_at >= since_6m))
-            .group_by(func.to_char(Booking.created_at, "YYYY-MM"))
+            .group_by(month_trunc)
         )).all()
-        comp_map = {r.month: r.completed for r in comp_rows}
-        monthly_trend = [{"month": r.month, "total": r.total, "completed": comp_map.get(r.month, 0)} for r in rows]
+        comp_map = {str(r.month_dt)[:7]: r.completed for r in comp_rows}
+        monthly_trend = [
+            {"month": str(r.month_dt)[:7], "total": r.total, "completed": comp_map.get(str(r.month_dt)[:7], 0)}
+            for r in rows
+        ]
     except Exception:
         monthly_trend = []
+
+    # ── Reset transaction after chart queries so remaining KPI queries succeed ──
+    try:
+        await db.rollback()
+    except Exception:
+        pass
 
     # ── Customer KPIs ──────────────────────────────────────────────────────
     async def cust_count(where_clause=None):
