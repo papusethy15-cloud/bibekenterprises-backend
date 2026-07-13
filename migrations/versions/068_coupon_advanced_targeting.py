@@ -1,7 +1,7 @@
 """068 coupon advanced targeting
 
 Revision ID: 068_coupon_advanced_targeting
-Revises: 067_add_razorpay_payout_settings
+Revises: 067
 Create Date: 2026-07-13
 """
 
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 
-revision = '068_coupon_advanced_targeting'
-down_revision = '067_add_razorpay_payout_settings'
+revision = '068'
+down_revision = '067'
 branch_labels = None
 depends_on = None
 
