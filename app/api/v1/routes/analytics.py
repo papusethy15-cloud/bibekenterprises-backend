@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, desc, text
+from sqlalchemy import select, func, and_, desc
 from datetime import datetime, timedelta
 from app.core.database import get_db
 from app.api.deps import AnyStaff
@@ -28,12 +28,7 @@ async def dashboard_kpis(
     since_30 = now - timedelta(days=29)
     since_6m = now - timedelta(days=180)
 
-    # ── Booking counts ─────────────────────────────────────────────────────
-    total_bookings = (await _safe(
-        db.execute(select(func.count()).select_from(Booking)), type('R', (), {'scalar_one': lambda self: 0})()
-    )).scalar_one()
-
-    # Simpler scalar helpers
+    # ── Booking helpers (inline try/except for safety) ────────────────────
     async def bk_count(where_clause=None):
         q = select(func.count()).select_from(Booking)
         if where_clause is not None:
