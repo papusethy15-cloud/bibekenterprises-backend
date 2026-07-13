@@ -21,7 +21,7 @@ class CheckOutRequest(BaseModel):
     notes: Optional[str] = None
 
 
-def _fmt_att(att) -> dict:
+def _fmt_att(att, tech_name: str | None = None, tech_mobile: str | None = None) -> dict:
     """Format one Attendance row for API response.
 
     hours_worked reflects TOTAL time worked today across all check-in/check-out
@@ -41,14 +41,17 @@ def _fmt_att(att) -> dict:
         total_seconds += (datetime.now(timezone.utc) - check_in_aware).total_seconds()
     hours_worked = round(total_seconds / 3600, 2) if total_seconds else 0.0
     return {
-        "id":            str(att.id),
-        "date":          str(att.date),
-        "status":        att.status,
-        "check_in":      check_in_dt,
-        "check_out":     check_out_dt,
-        "is_active":     is_active,
-        "hours_worked":  hours_worked,
-        "notes":         att.notes,
+        "id":               str(att.id),
+        "technician_id":    str(att.technician_id),
+        "technician_name":  tech_name,
+        "technician_mobile": tech_mobile,
+        "date":             str(att.date),
+        "status":           att.status,
+        "check_in":         check_in_dt,
+        "check_out":        check_out_dt,
+        "is_active":        is_active,
+        "hours_worked":     hours_worked,
+        "notes":            att.notes,
     }
 
 
@@ -225,20 +228,36 @@ async def list_attendance(
     technician_id: Optional[str] = None,
     date_from:     Optional[date] = None,
     date_to:       Optional[date] = None,
+    status:        Optional[str]  = None,
     current_user:  dict           = Depends(AdminOrCCO),
     db:            AsyncSession   = Depends(get_db),
 ):
     from app.models.attendance import Attendance
-    q = select(Attendance)
+    from app.models.technician import Technician
+    # JOIN Attendance with Technician to get name + mobile in one query
+    q = (
+        select(Attendance, Technician.name, Technician.mobile)
+        .join(Technician, Technician.id == Attendance.technician_id, isouter=True)
+    )
     if technician_id: q = q.where(Attendance.technician_id == UUID(technician_id))
     if date_from:     q = q.where(Attendance.date >= date_from)
     if date_to:       q = q.where(Attendance.date <= date_to)
-    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
-    items = (await db.execute(
+    if status:        q = q.where(Attendance.status == status)
+    count_q = select(func.count()).select_from(
+        select(Attendance).where(
+            *([Attendance.technician_id == UUID(technician_id)] if technician_id else []),
+            *([Attendance.date >= date_from] if date_from else []),
+            *([Attendance.date <= date_to] if date_to else []),
+            *([Attendance.status == status] if status else []),
+        ).subquery()
+    )
+    total = (await db.execute(count_q)).scalar_one()
+    rows = (await db.execute(
         q.order_by(Attendance.date.desc())
          .offset((page - 1) * per_page).limit(per_page)
-    )).scalars().all()
+    )).all()
     return success_response(data={
-        "items": [_fmt_att(a) for a in items],
+        "items": [_fmt_att(row[0], tech_name=row[1], tech_mobile=row[2]) for row in rows],
         "total": total,
+        "pages": max(1, -(-total // per_page)),
     })
