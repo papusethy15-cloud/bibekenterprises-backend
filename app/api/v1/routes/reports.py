@@ -958,8 +958,9 @@ async def technician_detail_report_pdf(
     from fastapi.responses import StreamingResponse
     from io import BytesIO
 
-    # Re-use the JSON endpoint logic by calling it and extracting data
-    # We inline the call to avoid code duplication
+    # Re-use the JSON endpoint logic by calling it and extracting data.
+    # technician_detail_report returns a plain dict via success_response(),
+    # NOT a JSONResponse — so we access .get("data") directly.
     resp = await technician_detail_report(
         technician_id=technician_id,
         period=period,
@@ -971,10 +972,7 @@ async def technician_detail_report_pdf(
         current_user=current_user,
         db=db,
     )
-    # resp is a JSONResponse — extract the data dict from its body
-    import json
-    body = json.loads(resp.body)
-    report_data = body.get("data", {})
+    report_data = resp.get("data", {})
 
     tech_name = report_data.get("technician", {}).get("name", "technician")
     period_str = f"{period}_{year or ''}{month or ''}{week or ''}"
