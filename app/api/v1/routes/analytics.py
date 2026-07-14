@@ -281,7 +281,7 @@ async def dashboard_kpis(
                 "customer_name": cname or "—",
                 "status": bk.status.value if bk.status else "UNKNOWN",
                 "total_amount": float(bk.total_amount or 0),
-                "created_at": bk.created_at.isoformat() if bk.created_at else None,
+                "created_at": iso(bk.created_at) if bk.created_at else None,
             }
             for bk, cname in bk_rows
         ]

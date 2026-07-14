@@ -23,7 +23,7 @@ async def list_articles(category: str = Query(None), page: int = Query(1, ge=1),
     if category: q = q.where(KBArticle.category == category)
     total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
     articles = (await db.execute(q.offset((page-1)*per_page).limit(per_page))).scalars().all()
-    return success_response(data={"items": [{"id": str(a.id), "title": a.title, "category": a.category, "tags": a.tags, "created_at": a.created_at.isoformat()} for a in articles], "total": total})
+    return success_response(data={"items": [{"id": str(a.id), "title": a.title, "category": a.category, "tags": a.tags, "created_at": iso(a.created_at)} for a in articles], "total": total})
 
 @router.post("/articles", summary="Create article [Admin]")
 async def create_article(payload: CreateArticleRequest, current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):

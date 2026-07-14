@@ -33,7 +33,7 @@ def _serialize(n) -> dict:
         "notification_type": notif_type,
         "channel":           n.channel,
         "data":              n.data,
-        "created_at":        n.created_at.isoformat() if n.created_at else None,
+        "created_at":        iso(n.created_at) if n.created_at else None,
     }
 
 

@@ -37,4 +37,4 @@ async def list_breaches(page: int = Query(1, ge=1), per_page: int = Query(20),
     breaches = (await db.execute(q.offset((page-1)*per_page).limit(per_page))).scalars().all()
     return success_response(data={"items": [{"id": str(b.id), "booking_id": str(b.booking_id),
                                               "breach_type": b.breach_type,
-                                              "breached_at": b.breached_at.isoformat()} for b in breaches], "total": total})
+                                              "breached_at": iso(b.breached_at)} for b in breaches], "total": total})

@@ -80,7 +80,7 @@ async def list_notes(customer_id: str = Query(...), current_user: dict = Depends
     return success_response(data=[{
         "id": str(n.id), "customer_id": str(n.customer_id), "added_by": str(n.added_by),
         "added_by_name": added_by_name, "note": n.note, "note_type": n.note_type,
-        "created_at": n.created_at.isoformat() if n.created_at else None,
+        "created_at": iso(n.created_at) if n.created_at else None,
     } for n, added_by_name in rows])
 
 @router.post("/followup", summary="Create follow-up [Staff]")
@@ -99,7 +99,7 @@ async def list_followups(page: int = Query(1, ge=1), per_page: int = Query(20),
     items = (await db.execute(select(CRMFollowup).where(CRMFollowup.is_active == True)
                               .order_by(CRMFollowup.due_date).offset((page-1)*per_page).limit(per_page))).scalars().all()
     return success_response(data=[{"id": str(f.id), "customer_id": str(f.customer_id),
-                                    "subject": f.subject, "due_date": f.due_date.isoformat(),
+                                    "subject": f.subject, "due_date": iso(f.due_date),
                                     "status": f.status} for f in items])
 
 @router.patch("/followups/{followup_id}/done", summary="Mark follow-up done [Staff]")
@@ -130,7 +130,7 @@ async def list_tasks(page: int = Query(1, ge=1), per_page: int = Query(20),
     items = (await db.execute(select(CRMTask).where(CRMTask.is_active == True)
                               .order_by(CRMTask.created_at.desc()).offset((page-1)*per_page).limit(per_page))).scalars().all()
     return success_response(data=[{"id": str(t.id), "title": t.title, "priority": t.priority,
-                                    "status": t.status, "due_date": t.due_date.isoformat() if t.due_date else None} for t in items])
+                                    "status": t.status, "due_date": iso(t.due_date) if t.due_date else None} for t in items])
 
 @router.post("/call-logs", summary="Log a customer call [Staff]")
 async def create_call_log(payload: CallLogRequest, current_user: dict = Depends(AnyStaff), db: AsyncSession = Depends(get_db)):
@@ -178,7 +178,7 @@ async def list_call_logs(
             "cco_name": cco_name, "booking_id": str(log.booking_id) if log.booking_id else None,
             "direction": log.direction, "duration_seconds": log.duration_seconds,
             "outcome": log.outcome, "summary": log.summary,
-            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "created_at": iso(log.created_at) if log.created_at else None,
         } for log, cco_name in rows],
         "total": total, "page": page, "per_page": per_page,
     })

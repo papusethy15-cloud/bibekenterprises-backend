@@ -205,9 +205,9 @@ async def list_commissions(
             "item_name":         c.item_name,
             "item_quantity":     c.item_quantity,
             "part_source":       c.part_source,
-            "payout_date":       c.payout_date.isoformat() if c.payout_date else None,
+            "payout_date":       iso(c.payout_date) if c.payout_date else None,
             "notes":             c.notes,
-            "created_at":        c.created_at.isoformat(),
+            "created_at":        iso(c.created_at),
         } for c in items],
         "total":    total,
         "page":     page,
@@ -369,7 +369,7 @@ async def list_groups(current_user: dict = Depends(AdminOnly), db: AsyncSession 
         result.append({
             "id": str(g.id), "name": g.name, "description": g.description,
             "is_active": g.is_active, "technician_count": tech_count,
-            "created_at": g.created_at.isoformat() if g.created_at else None,
+            "created_at": iso(g.created_at) if g.created_at else None,
             "rules": [{
                 "id":              str(r.id),
                 "service_id":      str(r.service_id),
@@ -535,7 +535,7 @@ async def list_part_rules(group_id: UUID, current_user: dict = Depends(AdminOnly
         "id": str(r.id), "group_id": str(r.group_id),
         "part_name_match": r.part_name_match, "part_source_filter": r.part_source_filter,
         "commission_type": r.commission_type, "rate": r.rate,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "created_at": iso(r.created_at) if r.created_at else None,
     } for r in rules])
 
 

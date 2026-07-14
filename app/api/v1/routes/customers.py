@@ -519,7 +519,7 @@ async def get_customer_payments(customer_id: UUID, page: int = Query(1, ge=1), p
     return success_response(data={"items": [{
         "payment_id": str(p.id), "transaction_number": p.transaction_number,
         "booking_number": b.booking_number, "method": p.method.value, "status": p.status.value,
-        "amount": p.amount, "paid_at": p.paid_at.isoformat() if p.paid_at else None
+        "amount": p.amount, "paid_at": iso(p.paid_at) if p.paid_at else None
     } for p, b in rows]})
 
 @router.get("/{customer_id}/bookings", summary="Customer bookings")

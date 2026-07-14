@@ -81,7 +81,7 @@ async def _tech_profile(tech: Technician, db: AsyncSession) -> dict:
         "experience_years": tech.experience_years,
         "last_lat":         tech.last_lat,
         "last_lng":         tech.last_lng,
-        "last_seen_at":     tech.last_seen_at.isoformat() if tech.last_seen_at else None,
+        "last_seen_at":     iso(tech.last_seen_at) if tech.last_seen_at else None,
         # Payout method
         "payout_upi_id":          tech.payout_upi_id,
         "payout_bank_account":    tech.payout_bank_account,
@@ -269,7 +269,7 @@ async def update_location(
                     "booking_id": str(active_booking.id),
                     "latitude": payload.lat,
                     "longitude": payload.lng,
-                    "recorded_at": location.recorded_at.isoformat(),
+                    "recorded_at": iso(location.recorded_at),
                 },
             ))
         except Exception:
@@ -294,7 +294,7 @@ async def captain_ping(
     tech = await _get_technician_for_user(current_user["user_id"], db)
     tech.last_seen_at = datetime.now(timezone.utc)
     await db.commit()
-    return success_response(data={"last_seen_at": tech.last_seen_at.isoformat()}, message="Ping received")
+    return success_response(data={"last_seen_at": iso(tech.last_seen_at)}, message="Ping received")
 
 
 @router.post("/me/restore-online", summary="Captain: restore online status on app reopen [Technician]")
@@ -318,7 +318,7 @@ async def restore_online(
             await db.commit()
 
     return success_response(
-        data={"is_online": tech.is_online, "last_seen_at": tech.last_seen_at.isoformat() if tech.last_seen_at else None},
+        data={"is_online": tech.is_online, "last_seen_at": iso(tech.last_seen_at) if tech.last_seen_at else None},
         message="Online status restored"
     )
 
@@ -438,7 +438,7 @@ async def captain_my_jobs(
                 "latitude":       float(addr.latitude) if addr and addr.latitude else None,
                 "longitude":      float(addr.longitude) if addr and addr.longitude else None,
                 # Sorting metadata — used by the app to keep newest-assigned first
-                "assigned_at":    assigned_at.isoformat() if assigned_at else booking.created_at.isoformat(),
+                "assigned_at":    iso(assigned_at) if assigned_at else iso(booking.created_at),
                 # Inspection data — so captain app knows if CCO already submitted
                 "inspection_notes":         booking.inspection_notes,
                 "inspection_photos":        (json.loads(booking.inspection_photos) if booking.inspection_photos else []),
@@ -559,7 +559,7 @@ async def captain_pending_assignments(
             "scheduled_time":    booking.scheduled_slot or None,
             "service_name":      booking.service_name or None,
             "score":             assignment.score,
-            "response_deadline": assignment.response_deadline.isoformat() if assignment.response_deadline else None,
+            "response_deadline": iso(assignment.response_deadline) if assignment.response_deadline else None,
         })
 
     return success_response(data={"requests": requests, "total": len(requests)})
@@ -680,7 +680,7 @@ async def captain_wallet_transactions(
         "reference_id":      r.reference_id,
         "description":       r.description,
         "status":            r.status,
-        "created_at":        r.created_at.isoformat() if r.created_at else None,
+        "created_at":        iso(r.created_at) if r.created_at else None,
     } for r in rows]
 
     return success_response(data={
@@ -720,7 +720,7 @@ async def captain_booking_commission(
         "base_amount": round(c.base_amount or 0, 2),
         "commission_amount": round(c.commission_amount or 0, 2),
         "status": c.status,
-        "payout_date": c.payout_date.isoformat() if c.payout_date else None,
+        "payout_date": iso(c.payout_date) if c.payout_date else None,
         "notes": c.notes,
     } for c in rows]
 
@@ -843,7 +843,7 @@ async def captain_get_customer_review(
         "rating": rating_row.rating,
         "review": rating_row.review,
         "customer_name": customer_name,
-        "created_at": rating_row.created_at.isoformat() if hasattr(rating_row, "created_at") and rating_row.created_at else None,
+        "created_at": iso(rating_row.created_at) if hasattr(rating_row, "created_at") and rating_row.created_at else None,
     })
 
 
@@ -920,9 +920,9 @@ async def captain_cash_collections(
             "customer_mobile":  cust.mobile        if cust else None,
             "amount":           rec.amount,
             "status":           rec.status.value,
-            "collected_at":     rec.collected_at.isoformat() if rec.collected_at else None,
+            "collected_at":     iso(rec.collected_at) if rec.collected_at else None,
             "notes":            rec.notes,
-            "created_at":       rec.created_at.isoformat() if rec.created_at else None,
+            "created_at":       iso(rec.created_at) if rec.created_at else None,
         })
 
     return success_response(data={
@@ -1009,9 +1009,9 @@ async def captain_my_commissions(
             "base_amount":       round(comm.base_amount or 0, 2),
             "commission_amount": round(comm.commission_amount or 0, 2),
             "status":            comm.status,           # PENDING | APPROVED | PAID
-            "payout_date":       comm.payout_date.isoformat() if comm.payout_date else None,
+            "payout_date":       iso(comm.payout_date) if comm.payout_date else None,
             "notes":             comm.notes,
-            "created_at":        comm.created_at.isoformat() if comm.created_at else None,
+            "created_at":        iso(comm.created_at) if comm.created_at else None,
         })
 
     return success_response(data={
@@ -1155,7 +1155,7 @@ async def captain_request_withdrawal(
         "id": str(req.id),
         "amount": req.amount,
         "status": req.status,
-        "created_at": req.created_at.isoformat() if req.created_at else None,
+        "created_at": iso(req.created_at) if req.created_at else None,
     }, message="Withdrawal request submitted. Admin will process it shortly.")
 
 
@@ -1191,8 +1191,8 @@ async def captain_list_withdrawal_requests(
         "bank_name": r.bank_name,
         "notes": r.notes,
         "admin_notes": r.admin_notes,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+        "created_at": iso(r.created_at) if r.created_at else None,
+        "reviewed_at": iso(r.reviewed_at) if r.reviewed_at else None,
     } for r in rows]
 
     return success_response(data={

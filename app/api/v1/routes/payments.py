@@ -168,10 +168,10 @@ def _payment_summary(transaction: PaymentTransaction, booking=None, customer_nam
         "payment_link": transaction.payment_link,
         "qr_payload": transaction.qr_payload,
         "notes": transaction.notes,
-        "paid_at": transaction.paid_at.isoformat() if transaction.paid_at else None,
-        "created_at": transaction.created_at.isoformat(),
-        "due_collect_at": transaction.due_collect_at.isoformat() if getattr(transaction, "due_collect_at", None) else None,
-        "last_reminder_at": transaction.last_reminder_at.isoformat() if getattr(transaction, "last_reminder_at", None) else None,
+        "paid_at": iso(transaction.paid_at) if transaction.paid_at else None,
+        "created_at": iso(transaction.created_at),
+        "due_collect_at": iso(transaction.due_collect_at) if getattr(transaction, "due_collect_at", None) else None,
+        "last_reminder_at": iso(transaction.last_reminder_at) if getattr(transaction, "last_reminder_at", None) else None,
     }
 
 
@@ -699,7 +699,7 @@ async def mark_pay_later_collected(
     await _apply_invoice_payment_state(db, invoice)
     await db.commit()
     return success_response(
-        data={"id": str(txn.id), "status": txn.status.value, "paid_at": txn.paid_at.isoformat()},
+        data={"id": str(txn.id), "status": txn.status.value, "paid_at": iso(txn.paid_at)},
         message="PAY_LATER marked as collected successfully"
     )
 

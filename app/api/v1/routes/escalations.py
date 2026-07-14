@@ -50,9 +50,9 @@ def _esc_dict(e, booking=None, customer=None) -> dict:
         ),
         "customer_mobile": getattr(customer, "mobile", None) or getattr(customer, "mobile_number", None) if customer else None,
         "assigned_to": str(e.assigned_to) if e.assigned_to else None,
-        "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
-        "created_at": e.created_at.isoformat(),
-        "updated_at": e.updated_at.isoformat() if hasattr(e, "updated_at") and e.updated_at else None,
+        "resolved_at": iso(e.resolved_at) if e.resolved_at else None,
+        "created_at": iso(e.created_at),
+        "updated_at": iso(e.updated_at) if hasattr(e, "updated_at") and e.updated_at else None,
     }
 
 

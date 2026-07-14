@@ -142,15 +142,15 @@ def _appliance_row(a, brand_name=None, type_name=None, cat_name=None,
         "category":              a.category,
         "model":                 a.model,
         "serial_number":         a.serial_number,
-        "purchase_date":         a.purchase_date.isoformat()     if a.purchase_date    else None,
-        "installation_date":     a.installation_date.isoformat() if a.installation_date else None,
-        "warranty_expiry":       a.warranty_expiry.isoformat()   if a.warranty_expiry  else None,
+        "purchase_date":         iso(a.purchase_date)     if a.purchase_date    else None,
+        "installation_date":     iso(a.installation_date) if a.installation_date else None,
+        "warranty_expiry":       iso(a.warranty_expiry)   if a.warranty_expiry  else None,
         "status":                a.status.value if hasattr(a.status, "value") else (a.status or "ACTIVE"),
         "is_under_warranty":     is_under_warranty,
         "notes":                 a.notes,
         "image_url":             a.image_url,
         "is_active":             a.is_active,
-        "created_at":            a.created_at.isoformat() if a.created_at else None,
+        "created_at":            iso(a.created_at) if a.created_at else None,
     }
 
 async def _enrich(a, db) -> dict:
@@ -674,7 +674,7 @@ async def appliance_history(
         "items": [{
             "id":             str(h.id),
             "booking_id":     str(h.booking_id) if h.booking_id else None,
-            "service_date":   h.service_date.isoformat() if h.service_date else None,
+            "service_date":   iso(h.service_date) if h.service_date else None,
             "issue_reported": h.issue_reported,
             "work_done":      h.work_done,
             "technician_id":  str(h.technician_id) if h.technician_id else None,
@@ -697,7 +697,7 @@ async def appliance_warranty(
     days_left = max(0, (a.warranty_expiry.replace(tzinfo=None) - now).days) if a.warranty_expiry else None
     return success_response(data={
         "appliance_id":    str(appliance_id),
-        "warranty_expiry": a.warranty_expiry.isoformat() if a.warranty_expiry else None,
+        "warranty_expiry": iso(a.warranty_expiry) if a.warranty_expiry else None,
         "is_valid":        is_valid,
         "days_remaining":  days_left,
         "status":          "VALID" if is_valid else ("EXPIRED" if a.warranty_expiry else "NOT_SET"),

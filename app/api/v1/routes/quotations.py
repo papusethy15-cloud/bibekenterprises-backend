@@ -174,9 +174,9 @@ def _quotation_summary(quotation: Quotation, booking_number: str | None = None):
         "tax_amount": quotation.tax_amount,
         "total_amount": quotation.total_amount,
         "remarks": quotation.remarks,
-        "approved_at": quotation.approved_at.isoformat() if quotation.approved_at else None,
+        "approved_at": iso(quotation.approved_at) if quotation.approved_at else None,
         "rejection_reason": quotation.rejection_reason,
-        "created_at": quotation.created_at.isoformat(),
+        "created_at": iso(quotation.created_at),
         "tax_mode": getattr(quotation, 'tax_mode', 'B2C') or 'B2C',
         "customer_gst_number":  getattr(quotation, 'customer_gst_number', None),
         "customer_gst_name":    getattr(quotation, 'customer_gst_name', None),
@@ -827,7 +827,7 @@ async def quotation_history(
                     "quotation_id": str(item.quotation_id),
                     "status": item.status.value,
                     "notes": item.notes,
-                    "created_at": item.created_at.isoformat(),
+                    "created_at": iso(item.created_at),
                 }
                 for item in logs
             ],

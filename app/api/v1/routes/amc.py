@@ -63,14 +63,14 @@ async def purchase_amc(payload: PurchaseAMCRequest, current_user: dict = Depends
                           start_date=start, end_date=end, visits_remaining=plan.visit_count,
                           amount_paid=plan.price)
     db.add(sub); await db.commit()
-    return success_response(data={"id": str(sub.id), "start_date": start.isoformat(), "end_date": end.isoformat()}, message="AMC purchased")
+    return success_response(data={"id": str(sub.id), "start_date": iso(start), "end_date": iso(end)}, message="AMC purchased")
 
 @router.get("/customer/{customer_id}", summary="Customer AMC subscriptions [Staff]")
 async def customer_amc(customer_id: UUID, current_user: dict = Depends(AdminOrCCO), db: AsyncSession = Depends(get_db)):
     from app.models.amc import AMCSubscription
     items = (await db.execute(select(AMCSubscription).where(AMCSubscription.customer_id == customer_id))).scalars().all()
     return success_response(data=[{"id": str(s.id), "plan_id": str(s.plan_id),
-                                    "start_date": s.start_date.isoformat(), "end_date": s.end_date.isoformat(),
+                                    "start_date": iso(s.start_date), "end_date": iso(s.end_date),
                                     "visits_remaining": s.visits_remaining, "status": s.status} for s in items])
 
 @router.post("/visit", summary="Schedule AMC visit [Admin/CCO]")
@@ -93,7 +93,7 @@ async def renewals_due(days: int = Query(30), current_user: dict = Depends(Admin
     items = (await db.execute(select(AMCSubscription).where(AMCSubscription.end_date <= cutoff,
                                                              AMCSubscription.is_active == True))).scalars().all()
     return success_response(data=[{"id": str(s.id), "customer_id": str(s.customer_id),
-                                    "end_date": s.end_date.isoformat(), "plan_id": str(s.plan_id)} for s in items])
+                                    "end_date": iso(s.end_date), "plan_id": str(s.plan_id)} for s in items])
 
 @router.post("/renew", summary="Renew AMC [Admin/CCO]")
 async def renew_amc(payload: RenewAMCRequest, current_user: dict = Depends(AdminOrCCO), db: AsyncSession = Depends(get_db)):
@@ -105,4 +105,4 @@ async def renew_amc(payload: RenewAMCRequest, current_user: dict = Depends(Admin
     if plan: sub.end_date = sub.end_date + relativedelta(months=plan.duration_months)
     sub.visits_remaining = plan.visit_count if plan else sub.visits_remaining
     await db.commit()
-    return success_response(data={"new_end_date": sub.end_date.isoformat()}, message="AMC renewed")
+    return success_response(data={"new_end_date": iso(sub.end_date)}, message="AMC renewed")

@@ -111,7 +111,7 @@ def _city_row(c: City) -> dict:
         "is_serviceable":     getattr(c, "is_serviceable", True),
         "sort_order":         c.sort_order,
         "is_active":          c.is_active,
-        "created_at":         c.created_at.isoformat() if c.created_at else None,
+        "created_at":         iso(c.created_at) if c.created_at else None,
     }
 
 def _area_row(a: Area) -> dict:

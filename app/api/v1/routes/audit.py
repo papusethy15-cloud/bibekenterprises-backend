@@ -64,7 +64,7 @@ async def list_audit_logs(
             "ip_address": l.ip_address,
             "user_agent": l.user_agent,
             "changes": changes,
-            "created_at": l.created_at.isoformat(),
+            "created_at": iso(l.created_at),
         }
 
     return success_response(data={"items": [_fmt(l) for l in logs], "total": total, "pages": pages})

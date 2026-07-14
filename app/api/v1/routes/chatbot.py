@@ -594,7 +594,7 @@ async def update_callback(
             "id": str(cb.id),
             "status": cb.status.value,
             "admin_notes": cb.admin_notes,
-            "called_at": cb.called_at.isoformat() if cb.called_at else None,
+            "called_at": iso(cb.called_at) if cb.called_at else None,
         },
         message="Callback request updated",
     )

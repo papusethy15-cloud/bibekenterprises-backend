@@ -89,7 +89,7 @@ async def public_reviews(
             "review": r.review,
             "customer_name": (r.customer_name or "Customer").split()[0],  # first name only
             "service_name": r.service_name or "",
-            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "created_at": iso(r.created_at) if r.created_at else None,
         }
         for r in rows
     ])
@@ -469,7 +469,7 @@ def _serialize(t: Technician, full: bool = False) -> dict:
     if full:
         base.update({
             "alternate_mobile": t.alternate_mobile,
-            "dob": t.dob.isoformat() if t.dob else None,
+            "dob": iso(t.dob) if t.dob else None,
             "gender": t.gender,
             "pincode": t.pincode,
             "address": t.address,
@@ -486,7 +486,7 @@ def _serialize(t: Technician, full: bool = False) -> dict:
             "payout_account_holder":  t.payout_account_holder,
             "payout_method_verified": t.payout_method_verified if t.payout_method_verified is not None else False,
             "has_payout_method":      bool(t.payout_upi_id or t.payout_bank_account),
-            "created_at": t.created_at.isoformat() if hasattr(t, 'created_at') and t.created_at else None,
+            "created_at": iso(t.created_at) if hasattr(t, 'created_at') and t.created_at else None,
         })
     return base
 

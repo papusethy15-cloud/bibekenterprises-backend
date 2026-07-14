@@ -87,8 +87,8 @@ async def _enrich_wallets(db, wallets):
             "total_earned":    round(w.total_earned or 0, 2),
             "total_withdrawn": round(w.total_withdrawn or 0, 2),
             "is_active":       w.is_active,
-            "updated_at":      w.updated_at.isoformat() if w.updated_at else None,
-            "created_at":      w.created_at.isoformat() if w.created_at else None,
+            "updated_at":      iso(w.updated_at) if w.updated_at else None,
+            "created_at":      iso(w.created_at) if w.created_at else None,
         })
     return result
 
@@ -129,7 +129,7 @@ async def my_transactions(
             "balance_after": t.balance_after,
             "description":   t.description,
             "status":        t.status,
-            "created_at":    t.created_at.isoformat(),
+            "created_at":    iso(t.created_at),
         } for t in txns],
         "total": total,
     })
@@ -240,7 +240,7 @@ async def wallet_transactions(
             "description":   t.description,
             "reference_id":  t.reference_id,
             "status":        t.status,
-            "created_at":    t.created_at.isoformat(),
+            "created_at":    iso(t.created_at),
         } for t in txns],
     })
 
@@ -390,8 +390,8 @@ async def admin_list_withdrawal_requests(
             "notes": wr.notes,
             "admin_notes": wr.admin_notes,
             "payment_reference": wr.payment_reference,
-            "reviewed_at": wr.reviewed_at.isoformat() if wr.reviewed_at else None,
-            "created_at": wr.created_at.isoformat() if wr.created_at else None,
+            "reviewed_at": iso(wr.reviewed_at) if wr.reviewed_at else None,
+            "created_at": iso(wr.created_at) if wr.created_at else None,
         })
     return success_response(data={
         "items": rows, "total": total,
@@ -575,8 +575,8 @@ async def admin_list_settlements(
             "commission_count": len(comms),
             "commission_status": comm_status,
             "commission_paid":  comm_paid,
-            "settled_at":  b.updated_at.isoformat() if b.updated_at else None,
-            "created_at":  b.created_at.isoformat() if b.created_at else None,
+            "settled_at":  iso(b.updated_at) if b.updated_at else None,
+            "created_at":  iso(b.created_at) if b.created_at else None,
         })
 
     return success_response(data={

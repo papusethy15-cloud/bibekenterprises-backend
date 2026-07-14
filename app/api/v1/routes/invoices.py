@@ -96,10 +96,10 @@ def _invoice_summary(invoice: Invoice, booking=None, customer_name: str = None, 
         "balance_amount": invoice.balance_amount or 0,
         "notes": invoice.notes,
         "pdf_url": invoice.pdf_url or f"/api/v1/invoices/{invoice.id}/pdf",
-        "sent_email_at": invoice.sent_email_at.isoformat() if invoice.sent_email_at else None,
-        "sent_whatsapp_at": invoice.sent_whatsapp_at.isoformat() if invoice.sent_whatsapp_at else None,
-        "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
-        "created_at": invoice.created_at.isoformat(),
+        "sent_email_at": iso(invoice.sent_email_at) if invoice.sent_email_at else None,
+        "sent_whatsapp_at": iso(invoice.sent_whatsapp_at) if invoice.sent_whatsapp_at else None,
+        "paid_at": iso(invoice.paid_at) if invoice.paid_at else None,
+        "created_at": iso(invoice.created_at),
         "customer_name": customer_name,
         "technician_name": technician_name,
         "customer_phone": booking.customer_phone if booking and hasattr(booking, "customer_phone") else None,
@@ -1103,7 +1103,7 @@ async def send_invoice_email(
     invoice.sent_email_at = now_naive()  # naive UTC for TIMESTAMP WITHOUT TIME ZONE
     await db.commit()
     return success_response(
-        data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": invoice.sent_email_at.isoformat()},
+        data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": iso(invoice.sent_email_at)},
         message="Invoice email queued successfully",
     )
 
@@ -1119,6 +1119,6 @@ async def send_invoice_whatsapp(
     invoice.sent_whatsapp_at = now_naive()  # naive UTC for TIMESTAMP WITHOUT TIME ZONE
     await db.commit()
     return success_response(
-        data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": invoice.sent_whatsapp_at.isoformat()},
+        data={"invoice_id": str(invoice.id), "recipient": payload.recipient, "sent_at": iso(invoice.sent_whatsapp_at)},
         message="Invoice WhatsApp queued successfully",
     )

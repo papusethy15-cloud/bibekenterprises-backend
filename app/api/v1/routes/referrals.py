@@ -28,13 +28,13 @@ async def my_referral_code(current_user: dict = Depends(AnyAuthenticated), db: A
 async def referral_history(current_user: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     from app.models.referral import Referral
     referrals = (await db.execute(select(Referral).where(Referral.referrer_id == UUID(current_user["user_id"])).order_by(Referral.created_at.desc()))).scalars().all()
-    return success_response(data=[{"id": str(r.id), "referee_id": str(r.referee_id), "reward_amount": r.reward_amount, "status": r.status, "created_at": r.created_at.isoformat()} for r in referrals])
+    return success_response(data=[{"id": str(r.id), "referee_id": str(r.referee_id), "reward_amount": r.reward_amount, "status": r.status, "created_at": iso(r.created_at)} for r in referrals])
 
 @router.get("/rewards", summary="Reward history")
 async def reward_history(current_user: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     from app.models.referral import ReferralReward
     rewards = (await db.execute(select(ReferralReward).where(ReferralReward.user_id == UUID(current_user["user_id"])))).scalars().all()
-    return success_response(data=[{"id": str(r.id), "amount": r.amount, "type": r.type, "status": r.status, "created_at": r.created_at.isoformat()} for r in rewards])
+    return success_response(data=[{"id": str(r.id), "amount": r.amount, "type": r.type, "status": r.status, "created_at": iso(r.created_at)} for r in rewards])
 
 @router.post("/redeem", summary="Redeem referral reward")
 async def redeem_reward(payload: RedeemRequest, current_user: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):

@@ -52,4 +52,4 @@ async def update_vendor(vendor_id: UUID, payload: UpdateVendorRequest, current_u
 async def vendor_transactions(vendor_id: UUID, page: int = Query(1, ge=1), per_page: int = Query(20), current_user: dict = Depends(AnyStaff), db: AsyncSession = Depends(get_db)):
     from app.models.vendor import VendorTransaction
     txns = (await db.execute(select(VendorTransaction).where(VendorTransaction.vendor_id == vendor_id).order_by(VendorTransaction.created_at.desc()).offset((page-1)*per_page).limit(per_page))).scalars().all()
-    return success_response(data=[{"id": str(t.id), "amount": t.amount, "type": t.type, "notes": t.notes, "created_at": t.created_at.isoformat()} for t in txns])
+    return success_response(data=[{"id": str(t.id), "amount": t.amount, "type": t.type, "notes": t.notes, "created_at": iso(t.created_at)} for t in txns])

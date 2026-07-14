@@ -22,7 +22,7 @@ from app.api.v1.schemas.booking import (
     CancelBookingRequest, SubmitInspectionRequest, VisitingChargeRequest
 )
 from app.api.deps import AdminOrCCO, AnyAuthenticated
-from app.utils.response import success_response
+from app.utils.response import success_response, iso
 from app.utils.notify import push_to_technician
 from pydantic import BaseModel
 from typing import Optional
@@ -30,6 +30,7 @@ _BM = BaseModel   # alias used by legacy classes in this file
 _Opt = Optional  # alias used by legacy classes in this file
 
 router = APIRouter()
+
 
 def generate_booking_number():
     suffix = ''.join(random.choices(string.digits, k=8))
@@ -801,7 +802,7 @@ async def list_bookings(
             "coupon_code": b.coupon_code,
             "coupon_discount": b.coupon_discount or 0.0,
             "domain_name": domain.name if domain else None,
-            "created_at": b.created_at.isoformat() if b.created_at else None,
+            "created_at": iso(b.created_at) if b.created_at else None,
         })
 
     # ── Enrich with quotation summary (batch, one query) ──────────────
@@ -914,7 +915,7 @@ async def list_bookings(
         for item in items:
             due = pl_map.get(item["id"])
             item["has_pay_later"] = due is not None
-            item["pay_later_due"] = due.isoformat() if due else None
+            item["pay_later_due"] = iso(due) if due else None
     else:
         for item in items:
             item["has_pay_later"] = False
@@ -990,7 +991,7 @@ async def track_booking(
     )).scalars().all()
     timeline = [{
         "status": l.status.value,
-        "timestamp": l.created_at.isoformat(),
+        "timestamp": iso(l.created_at),
         "description": l.notes or l.status.value.replace("_", " ").title(),
     } for l in logs]
 
@@ -1072,8 +1073,8 @@ async def get_booking(booking_id: UUID, current_user: dict = Depends(AnyAuthenti
         "domain_name": domain.name if domain else None,
         "domain_id": str(b.domain_id) if b.domain_id else None,
         "city_id": str(b.city_id) if b.city_id else None,
-        "created_at": b.created_at.isoformat() if b.created_at else None,
-        "updated_at": b.updated_at.isoformat() if hasattr(b, "updated_at") and b.updated_at else None,
+        "created_at": iso(b.created_at) if b.created_at else None,
+        "updated_at": iso(b.updated_at) if hasattr(b, "updated_at") and b.updated_at else None,
         "inspection_notes": b.inspection_notes,
         "inspection_photos": (json.loads(b.inspection_photos) if b.inspection_photos else []),
         "inspection_submitted_by": b.inspection_submitted_by,
@@ -1651,7 +1652,7 @@ async def booking_timeline(booking_id: UUID, current_user: dict = Depends(AnyAut
     logs = (await db.execute(
         select(BookingStatusLog).where(BookingStatusLog.booking_id == booking_id).order_by(BookingStatusLog.created_at)
     )).scalars().all()
-    return success_response(data=[{"status": l.status.value, "notes": l.notes, "at": l.created_at.isoformat()} for l in logs])
+    return success_response(data=[{"status": l.status.value, "notes": l.notes, "at": iso(l.created_at)} for l in logs])
 
 
 @router.get("/{booking_id}/tracking", summary="Booking live tracking")
@@ -1714,7 +1715,7 @@ async def booking_tracking(booking_id: UUID, current_user: dict = Depends(AnyAut
                     "accuracy": location.accuracy,
                     "speed": location.speed,
                     "heading": location.heading,
-                    "recorded_at": location.recorded_at.isoformat(),
+                    "recorded_at": iso(location.recorded_at),
                 }
                 if location
                 else None

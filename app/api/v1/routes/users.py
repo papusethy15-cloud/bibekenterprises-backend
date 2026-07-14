@@ -98,7 +98,7 @@ def _serialize_user(user: User):
         "city": user.city,
         "is_verified": user.is_verified,
         "is_active": user.is_active,
-        "created_at": user.created_at.isoformat(),
+        "created_at": iso(user.created_at),
         "profile_image": user.profile_image,
         "id_proof_url": user.id_proof_url,
         "id_proof_type": user.id_proof_type,

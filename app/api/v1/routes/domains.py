@@ -102,7 +102,7 @@ def _domain_row(d: Domain, service_count: int = 0, category_count: int = 0, city
         "service_count": service_count,
         "category_count":category_count,
         "city_count":    city_count,
-        "created_at":    d.created_at.isoformat() if d.created_at else None,
+        "created_at":    iso(d.created_at) if d.created_at else None,
     }
 
 # ══════════════════════════════════════════════════════════════

@@ -54,7 +54,7 @@ from app.models.customer import CustomerAddress
 from app.models.technician import Technician, TechnicianSkill, TechnicianStatus
 from app.utils.fcm import send_booking_push, send_simple_push
 from app.utils.notify import push_to_technician
-from app.utils.response import success_response
+from app.utils.response import success_response, iso
 from app.websocket.manager import (
     ADMIN_ASSIGNMENTS_ROOM,
     ADMIN_BOOKINGS_ROOM,
@@ -420,7 +420,7 @@ async def _apply_assignment(
             "service_name":     getattr(booking, "service_name", None),
             "scheduled_date":   str(booking.scheduled_date) if getattr(booking, "scheduled_date", None) else None,
             "scheduled_time":   str(getattr(booking, "scheduled_slot", None) or ""),
-            "response_deadline": new_assignment.response_deadline.isoformat() if new_assignment.response_deadline else None,
+            "response_deadline": iso(new_assignment.response_deadline) if new_assignment.response_deadline else None,
         }
         track_task(publish_event(technician_room(str(technician.id)), WSEvent.ASSIGNMENT_CREATED, tech_payload))
     except Exception as ws_err:
@@ -792,7 +792,7 @@ async def auto_assign(
             "score":              round(score, 2),
             "current_workload":   workload,
             "assignment_id":      str(new_asgn.id),
-            "response_deadline":  new_asgn.response_deadline.isoformat(),
+            "response_deadline":  iso(new_asgn.response_deadline),
             "max_response_minutes": MAX_RESPONSE_MINUTES,
         },
         message="Booking auto assigned successfully",
@@ -866,7 +866,7 @@ async def manual_assign(
             "technician_id":     str(technician.id),
             "technician_name":   technician.name,
             "assignment_id":     str(new_asgn.id),
-            "response_deadline": new_asgn.response_deadline.isoformat(),
+            "response_deadline": iso(new_asgn.response_deadline),
             "max_response_minutes": MAX_RESPONSE_MINUTES,
         },
         message="Booking manually assigned successfully",
@@ -907,8 +907,8 @@ async def screen_ack(
     return success_response(
         data={
             "assignment_id":  assignment_id,
-            "screen_shown_at": asgn.screen_shown_at.isoformat() if asgn.screen_shown_at else None,
-            "response_deadline": asgn.response_deadline.isoformat() if asgn.response_deadline else None,
+            "screen_shown_at": iso(asgn.screen_shown_at) if asgn.screen_shown_at else None,
+            "response_deadline": iso(asgn.response_deadline) if asgn.response_deadline else None,
         },
         message="Screen acknowledgement recorded",
     )
@@ -1122,9 +1122,9 @@ async def assignment_history(
                     "status":            item.status.value,
                     "score":             round(item.score or 0, 1),
                     "notes":             item.notes,
-                    "screen_shown_at":   item.screen_shown_at.isoformat() if item.screen_shown_at else None,
-                    "response_deadline": item.response_deadline.isoformat() if item.response_deadline else None,
-                    "created_at":        item.created_at.isoformat(),
+                    "screen_shown_at":   iso(item.screen_shown_at) if item.screen_shown_at else None,
+                    "response_deadline": iso(item.response_deadline) if item.response_deadline else None,
+                    "created_at":        iso(item.created_at),
                 }
                 for item, bk, tech in rows
             ],
@@ -1247,7 +1247,7 @@ async def get_assignment_candidates(
                 "distance_km":     dist_km,
                 "last_lat":        tech.last_lat,
                 "last_lng":        tech.last_lng,
-                "last_seen_at":    tech.last_seen_at.isoformat() if getattr(tech, "last_seen_at", None) else None,
+                "last_seen_at":    iso(tech.last_seen_at) if getattr(tech, "last_seen_at", None) else None,
                 "score_breakdown": {
                     "skill":     round(skill_pts, 1),
                     "rating":    round(rating_pts, 1),

@@ -30,7 +30,7 @@ def _serialize_location(location: TrackingLocation):
         "speed": location.speed,
         "heading": location.heading,
         "source": location.source,
-        "recorded_at": location.recorded_at.isoformat(),
+        "recorded_at": iso(location.recorded_at),
     }
 
 

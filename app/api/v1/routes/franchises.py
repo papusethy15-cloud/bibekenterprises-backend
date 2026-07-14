@@ -24,7 +24,7 @@ async def list_franchises(page: int = Query(1, ge=1), per_page: int = Query(20),
     items = (await db.execute(q.offset((page-1)*per_page).limit(per_page))).scalars().all()
     return success_response(data={"items": [{"id": str(f.id), "name": f.name, "city": f.city,
                                               "state": f.state, "commission_rate": f.commission_rate,
-                                              "created_at": f.created_at.isoformat()} for f in items], "total": total})
+                                              "created_at": iso(f.created_at)} for f in items], "total": total})
 
 @router.post("", summary="Create franchise [Admin]")
 async def create_franchise(payload: CreateFranchiseRequest, current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):

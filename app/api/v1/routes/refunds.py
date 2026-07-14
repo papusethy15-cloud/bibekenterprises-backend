@@ -64,8 +64,8 @@ async def list_refunds(page: int = Query(1, ge=1), per_page: int = Query(20), st
             "refund_method": r.refund_method,
             "gateway_refund_id": r.gateway_refund_id,
             "notes": r.notes,
-            "processed_at": r.processed_at.isoformat() if r.processed_at else None,
-            "created_at": r.created_at.isoformat(),
+            "processed_at": iso(r.processed_at) if r.processed_at else None,
+            "created_at": iso(r.created_at),
         }
     return success_response(data={"items": [_fmt(r) for r in items], "total": total, "pages": (total + per_page - 1) // per_page})
 

@@ -48,9 +48,9 @@ def _fmt_collection(rec: CashCollectionRecord, technician=None, customer=None,
         "status":  rec.status.value,
         "collected_by": str(rec.collected_by) if rec.collected_by else None,
         "collected_by_name": collected_by_user.name if collected_by_user else None,
-        "collected_at": rec.collected_at.isoformat() if rec.collected_at else None,
+        "collected_at": iso(rec.collected_at) if rec.collected_at else None,
         "notes":   rec.notes,
-        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+        "created_at": iso(rec.created_at) if rec.created_at else None,
     }
 
 

@@ -298,7 +298,7 @@ async def list_pending_services(
             "gst_percent": svc.gst_percent,
             "duration_mins": svc.duration_mins,
             "description": svc.description,
-            "created_at": svc.created_at.isoformat() if svc.created_at else None,
+            "created_at": iso(svc.created_at) if svc.created_at else None,
             "suggested_by_tech_id": str(svc.suggested_by_tech) if svc.suggested_by_tech else None,
             "suggested_by_tech_name": tech_name,
             "quotation_item_id": str(q_item.id) if q_item else None,

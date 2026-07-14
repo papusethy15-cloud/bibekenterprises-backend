@@ -189,7 +189,7 @@ def _item_row(i, categories: list = None, brand_name: str = None):
         "is_serialised": i.is_serialised,
         "image_url": i.image_url,
         "is_active": i.is_active,
-        "created_at": i.created_at.isoformat() if i.created_at else None,
+        "created_at": iso(i.created_at) if i.created_at else None,
     }
 
 
@@ -209,7 +209,7 @@ def _movement_row(m):
         "notes": m.notes,
         "unit_cost": m.unit_cost,
         "performed_by": str(m.performed_by) if m.performed_by else None,
-        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "created_at": iso(m.created_at) if m.created_at else None,
     }
 
 
@@ -752,7 +752,7 @@ async def list_challans(
             "to_warehouse_id":   str(c.to_warehouse_id)   if c.to_warehouse_id   else None,
             "to_technician_id":  str(c.to_technician_id)  if c.to_technician_id  else None,
             "reference_no": c.reference_no, "notes": c.notes,
-            "created_at": c.created_at.isoformat(),
+            "created_at": iso(c.created_at),
             "items": json.loads(c.items_json or "[]"),
         } for c in challans],
         "total": total, "page": page, "per_page": per_page,
@@ -774,7 +774,7 @@ async def list_direct_sales(
             "customer_name": s.customer_name, "customer_mobile": s.customer_mobile,
             "subtotal": s.subtotal, "gst_amount": s.gst_amount, "total_amount": s.total_amount,
             "payment_method": s.payment_method, "payment_status": s.payment_status,
-            "created_at": s.created_at.isoformat(),
+            "created_at": iso(s.created_at),
             "items": json.loads(s.items_json or "[]"),
         } for s in sales],
         "total": total, "page": page, "per_page": per_page,
@@ -1380,7 +1380,7 @@ async def technician_stock_history(
             "sku": item.sku, "unit": item.unit,
             "status": log.status.value if hasattr(log.status, 'value') else log.status,
             "quantity": log.quantity, "booking_id": str(log.booking_id) if log.booking_id else None,
-            "notes": log.notes, "created_at": log.created_at.isoformat() if log.created_at else None
+            "notes": log.notes, "created_at": iso(log.created_at) if log.created_at else None
         } for log, item in rows],
         "total": total, "page": page, "per_page": per_page
     })
@@ -1559,9 +1559,9 @@ async def get_challan(challan_id: UUID, current_user: dict = Depends(AnyStaff), 
         "to_warehouse_id":   str(c.to_warehouse_id)   if c.to_warehouse_id   else None,
         "to_technician_id":  str(c.to_technician_id)  if c.to_technician_id  else None,
         "reference_no": c.reference_no, "notes": c.notes,
-        "dispatched_at": c.dispatched_at.isoformat() if c.dispatched_at else None,
-        "received_at": c.received_at.isoformat() if c.received_at else None,
-        "created_at": c.created_at.isoformat(),
+        "dispatched_at": iso(c.dispatched_at) if c.dispatched_at else None,
+        "received_at": iso(c.received_at) if c.received_at else None,
+        "created_at": iso(c.created_at),
         "items": json.loads(c.items_json or "[]"),
     })
 
@@ -1749,7 +1749,7 @@ async def booking_parts(booking_id: UUID, current_user: dict = Depends(AnyStaff)
         "item_name": r.item_name, "sku": r.sku, "unit": r.unit,
         "quantity": r.BookingPartUsage.quantity, "unit_price": r.BookingPartUsage.unit_price,
         "total_amount": r.BookingPartUsage.total_amount, "notes": r.BookingPartUsage.notes,
-        "created_at": r.BookingPartUsage.created_at.isoformat()
+        "created_at": iso(r.BookingPartUsage.created_at)
     } for r in rows])
 
 

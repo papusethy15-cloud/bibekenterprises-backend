@@ -251,7 +251,7 @@ async def get_profile(current_user: dict = Depends(get_current_user), db: AsyncS
         "id": str(user.id), "name": user.name, "mobile": user.mobile,
         "email": user.email, "role": user.role.value,
         "city": user.city, "profile_image": user.profile_image,
-        "is_verified": user.is_verified, "created_at": user.created_at.isoformat()
+        "is_verified": user.is_verified, "created_at": iso(user.created_at)
     })
 
 @router.put("/profile", summary="Update my profile")
@@ -404,8 +404,8 @@ async def get_me(
         "address_proof_type":user.address_proof_type,
         "is_verified":       user.is_verified,
         "is_active":         user.is_active,
-        "created_at":        user.created_at.isoformat(),
-        "updated_at":        user.updated_at.isoformat() if user.updated_at else None,
+        "created_at":        iso(user.created_at),
+        "updated_at":        iso(user.updated_at) if user.updated_at else None,
     })
 
 

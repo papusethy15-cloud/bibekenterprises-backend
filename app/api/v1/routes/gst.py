@@ -62,7 +62,7 @@ def _serialize_settings(settings: GSTSetting):
         "invoice_prefix": settings.invoice_prefix,
         "state_code": settings.state_code,
         "updated_by": str(settings.updated_by) if settings.updated_by else None,
-        "updated_at": settings.updated_at.isoformat() if settings.updated_at else None,
+        "updated_at": iso(settings.updated_at) if settings.updated_at else None,
     }
 
 

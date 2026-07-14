@@ -28,8 +28,8 @@ def _fmt_att(att, tech_name: str | None = None, tech_mobile: str | None = None) 
     sessions (accumulated_seconds), plus the live elapsed time of the current
     session if the technician is still checked in (check_in set, check_out null).
     """
-    check_in_dt  = att.check_in.isoformat()  if att.check_in  else None
-    check_out_dt = att.check_out.isoformat() if att.check_out else None
+    check_in_dt  = iso(att.check_in)  if att.check_in  else None
+    check_out_dt = iso(att.check_out) if att.check_out else None
     total_seconds = att.accumulated_seconds or 0
     is_active = bool(att.check_in and not att.check_out)
     if is_active:

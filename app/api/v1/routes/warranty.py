@@ -32,7 +32,7 @@ async def list_warranties(page: int = Query(1, ge=1), per_page: int = Query(20),
     if customer_id: q = q.where(Warranty.customer_id == customer_id)
     items = (await db.execute(q.order_by(Warranty.expiry_date).offset((page-1)*per_page).limit(per_page))).scalars().all()
     return success_response(data=[{"id": str(w.id), "warranty_type": w.warranty_type,
-                                    "description": w.description, "expiry_date": w.expiry_date.isoformat(),
+                                    "description": w.description, "expiry_date": iso(w.expiry_date),
                                     "status": w.status} for w in items])
 
 @router.post("", summary="Create warranty [Admin]")
@@ -52,7 +52,7 @@ async def get_warranty(warranty_id: UUID, current_user: dict = Depends(AnyAuthen
     w = (await db.execute(select(Warranty).where(Warranty.id == warranty_id))).scalar_one_or_none()
     if not w: raise HTTPException(status_code=404, detail="Warranty not found")
     return success_response(data={"id": str(w.id), "warranty_type": w.warranty_type,
-                                   "description": w.description, "expiry_date": w.expiry_date.isoformat(),
+                                   "description": w.description, "expiry_date": iso(w.expiry_date),
                                    "parts_covered": w.parts_covered, "status": w.status})
 
 @router.post("/claim", summary="Create warranty claim [Customer/CCO]")

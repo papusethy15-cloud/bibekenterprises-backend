@@ -54,8 +54,8 @@ def _coupon_dict(c, domain_name: str = None) -> dict:
         "max_discount_amount": c.max_discount_amount,
         "usage_limit": c.usage_limit,
         "used_count": c.used_count or 0,
-        "valid_from": c.valid_from.isoformat() if c.valid_from else None,
-        "valid_until": c.valid_until.isoformat() if c.valid_until else None,
+        "valid_from": iso(c.valid_from) if c.valid_from else None,
+        "valid_until": iso(c.valid_until) if c.valid_until else None,
         "is_active": c.is_active,
         "domain_id": str(c.domain_id) if c.domain_id else None,
         "domain_name": domain_name,
@@ -63,7 +63,7 @@ def _coupon_dict(c, domain_name: str = None) -> dict:
         "service_ids": [str(x) for x in (c.service_ids or [])],
         "category_ids": [str(x) for x in (c.category_ids or [])],
         "per_customer_limit": c.per_customer_limit,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "created_at": iso(c.created_at) if c.created_at else None,
     }
 
 
