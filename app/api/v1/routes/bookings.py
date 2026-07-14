@@ -2037,6 +2037,7 @@ async def commission_preview(
 
         for pi in part_items:
             src = pi.part_source.value if pi.part_source else "OFFICE_STOCK"
+            purchase_cost = (pi.purchase_price or 0) * pi.quantity  # total cost technician paid
             # Find matching part rule: source filter matches or is NULL
             matched_rule = next((
                 r for r in group_part_rules
@@ -2045,21 +2046,20 @@ async def commission_preview(
             ), None)
             if matched_rule:
                 if matched_rule.commission_type == "PERCENTAGE":
-                    # OFFICE_STOCK: commission = rate% of profit (selling - cost)
-                    # MARKET_PURCHASE: technician keeps purchase cost; commission = rate% of selling price
-                    if src == "OFFICE_STOCK":
-                        purchase = pi.purchase_price if pi.purchase_price else 0
-                        profit = pi.unit_price - purchase
-                        profit_total = max(profit, 0) * pi.quantity
-                        comm = round(profit_total * matched_rule.rate / 100, 2)
-                    else:  # MARKET_PURCHASE
-                        comm = round(pi.total_price * matched_rule.rate / 100, 2)
+                    # Both OFFICE_STOCK and MARKET_PURCHASE: commission = rate% of PROFIT (selling - cost).
+                    # For MARKET_PURCHASE the purchase cost is also reimbursed separately.
+                    purchase_unit = pi.purchase_price or 0
+                    profit = pi.unit_price - purchase_unit
+                    profit_total = max(profit, 0) * pi.quantity
+                    comm = round(profit_total * matched_rule.rate / 100, 2)
                 else:  # FLAT
                     comm = round(matched_rule.rate * pi.quantity, 2)
                 match_status = "group"
             else:
                 comm = None
                 match_status = "unmatched"
+            # For MARKET_PURCHASE: technician also gets purchase cost back (separate reimbursement)
+            reimb = round(purchase_cost, 2) if src == "MARKET_PURCHASE" else 0.0
             line_items.append({
                 "type": "PART",
                 "quotation_number": q.quotation_number,
@@ -2073,16 +2073,21 @@ async def commission_preview(
                 "commission_type": matched_rule.commission_type if matched_rule else None,
                 "rate": matched_rule.rate if matched_rule else None,
                 "commission_amount": comm,
+                "purchase_reimbursement": reimb,  # ₹ paid back to tech for market parts
                 "matched": matched_rule is not None,
                 "match_status": match_status,
             })
 
+    # Total payout = commission on all items + purchase reimbursement on MARKET parts
     total_commission = sum(item["commission_amount"] for item in line_items if item["commission_amount"] is not None)
+    total_reimbursement = sum(item.get("purchase_reimbursement", 0) for item in line_items)
     return success_response(data={
         "technician": {"id": str(tech.id), "name": tech.name, "user_id": str(tech.user_id)} if tech else None,
         "commission_group": {"id": str(group.id), "name": group.name} if group else None,
         "line_items": line_items,
         "total_commission": round(total_commission, 2),
+        "total_reimbursement": round(total_reimbursement, 2),
+        "total_payout": round(total_commission + total_reimbursement, 2),
     })
 
 
@@ -2195,28 +2200,30 @@ async def settle_booking(
                                 "appliance_label": getattr(si, "appliance_label", None)})
         for pi in part_items:
             src = pi.part_source.value if pi.part_source else "OFFICE_STOCK"
+            purchase_cost = (pi.purchase_price or 0) * pi.quantity  # total out-of-pocket for technician
             matched = next((r for r in group_part_rules
                             if (r.part_source_filter is None or r.part_source_filter == src)
                             and (r.part_name_match is None or r.part_name_match.lower() in pi.part_name.lower())), None)
             if matched:
                 if matched.commission_type == "PERCENTAGE":
-                    # OFFICE_STOCK: commission = rate% of profit (selling price - cost)
-                    # MARKET_PURCHASE: technician keeps purchase cost; commission = rate% of selling price
-                    if src == "OFFICE_STOCK":
-                        purchase = pi.purchase_price if pi.purchase_price else 0
-                        profit = pi.unit_price - purchase
-                        profit_total = max(profit, 0) * pi.quantity
-                        comm = round(profit_total * matched.rate / 100, 2)
-                    else:  # MARKET_PURCHASE
-                        comm = round(pi.total_price * matched.rate / 100, 2)
+                    # Both sources: commission = rate% of PROFIT (selling price - purchase cost)
+                    # MARKET_PURCHASE: purchase cost also reimbursed separately below
+                    purchase_unit = pi.purchase_price or 0
+                    profit = pi.unit_price - purchase_unit
+                    profit_total = max(profit, 0) * pi.quantity
+                    comm = round(profit_total * matched.rate / 100, 2)
                 else:  # FLAT
                     comm = round(matched.rate * pi.quantity, 2)
             else:
                 comm = None
+            # MARKET_PURCHASE: reimbursement = purchase cost technician paid from own pocket
+            reimb = round(purchase_cost, 2) if src == "MARKET_PURCHASE" else 0.0
             line_items.append({"type": "PART", "name": pi.part_name, "quantity": pi.quantity,
+                                "unit_price": pi.unit_price, "purchase_price": pi.purchase_price,
                                 "total_price": pi.total_price, "part_source": src,
                                 "commission_type": matched.commission_type if matched else "PERCENTAGE",
                                 "rate": matched.rate if matched else 0, "commission_amount": comm,
+                                "purchase_reimbursement": reimb,
                                 "is_repeat_complaint": bool(getattr(pi, "is_repeat_complaint", False)),
                                 "appliance_label": None})
 
@@ -2328,9 +2335,12 @@ async def settle_booking(
             ))
 
     # Save Commission records per line (normal, non-repeat items only)
+    # For MARKET_PURCHASE parts: two records — PURCHASE_REIMBURSEMENT + commission on profit.
+    # For OFFICE_STOCK parts / services: one record — commission on profit only.
     if tech:
         for item in normal_items:
-            c = Commission(
+            # 1. Main commission record (profit commission or manual override)
+            db.add(Commission(
                 technician_id=tech.id,
                 booking_id=booking.id,
                 base_amount=item["total_price"],
@@ -2340,9 +2350,26 @@ async def settle_booking(
                 item_name=item["name"],
                 item_quantity=item["quantity"],
                 part_source=item["part_source"],
-                notes=f"Settled: {item['commission_type']} {item['rate']}% on {item['name']}" if item["rate"] else f"Manual override: {item['commission_amount']}",
-            )
-            db.add(c)
+                notes=(
+                    f"Settled: {item['commission_type']} {item['rate']}% profit commission on {item['name']}"
+                    if item.get("rate") else f"Manual override: ₹{item['commission_amount']}"
+                ),
+            ))
+            # 2. Purchase reimbursement for MARKET_PURCHASE parts (tech paid from own pocket)
+            reimb = item.get("purchase_reimbursement", 0) or 0
+            if reimb > 0:
+                db.add(Commission(
+                    technician_id=tech.id,
+                    booking_id=booking.id,
+                    base_amount=item["total_price"],
+                    commission_amount=reimb,
+                    status="PENDING",
+                    item_type="PURCHASE_REIMBURSEMENT",
+                    item_name=item["name"],
+                    item_quantity=item["quantity"],
+                    part_source=item["part_source"],
+                    notes=f"Market part purchase reimbursement: ₹{item.get('purchase_price', 0)} × {item['quantity']} unit(s) — {item['name']}",
+                ))
         # NOTE: Wallet is NOT credited here. The technician's wallet is credited
         # only when admin clicks "Mark Paid" (Confirm Payment) on the Commissions page.
 
