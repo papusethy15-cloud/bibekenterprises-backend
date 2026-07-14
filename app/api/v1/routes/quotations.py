@@ -1575,8 +1575,16 @@ async def add_quotation_appliance(
     # yet, automatically add the booking's booked service as a service item
     # under this appliance. This saves the technician/CCO/admin from having to
     # manually re-add a service they already know from the booking.
-    # Category-smart: the service is pre-linked to the booking's service, which
-    # is already category-filtered (AC booking → AC service category).
+    #
+    # FIX: We flush before counting so the new appliance row is visible,
+    # then commit the appliance row FIRST, and only then auto-insert the
+    # service item in a separate flush+recalculate+commit cycle. This avoids
+    # ORM cache issues where _recalculate_quotation can't see the raw-SQL
+    # service insert in the same transaction unit.
+    await db.commit()  # commit the appliance row first
+    _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
+
+    # ── Now auto-add the booking service item (separate transaction) ──────
     try:
         existing_service_count = (await db.execute(
             sa_text("SELECT COUNT(*) FROM quotation_service_items WHERE quotation_id=:qid AND is_active=true"),
@@ -1586,8 +1594,8 @@ async def add_quotation_appliance(
             sa_text("SELECT COUNT(*) FROM quotation_appliances WHERE quotation_id=:qid AND is_active=true"),
             {"qid": str(quotation_id)}
         )).scalar() or 0
-        # Only auto-add if this is the first appliance AND there are no service items yet
-        if existing_appliance_count <= 1 and existing_service_count == 0:
+        # Only auto-add if this is the FIRST appliance AND there are no service items yet
+        if existing_appliance_count == 1 and existing_service_count == 0:
             booking_row = (await db.execute(
                 sa_text("""
                     SELECT b.service_id, b.service_name, b.city_id
@@ -1611,7 +1619,7 @@ async def add_quotation_appliance(
                             """),
                             {"sid": str(svc_row["id"]), "cid": str(booking_row["city_id"])}
                         )).scalar()
-                        if cp:
+                        if cp is not None:
                             unit_price = float(cp)
                     encoded_name = f"{label} :: {svc_row['name']}"
                     await db.execute(
@@ -1631,17 +1639,19 @@ async def add_quotation_appliance(
                             "lbl": label,
                         }
                     )
-                    # Flush so the raw-SQL insert is visible to the ORM select inside _recalculate
+                    # Flush the raw-SQL insert so ORM queries in _recalculate see it
                     await db.flush()
-                    db.expire_all()  # force re-read of all cached ORM objects incl. service items
+                    # Expire ORM cache so QuotationServiceItem query re-reads from DB
+                    db.expire_all()
+                    # Re-fetch quotation to get fresh ORM state after expire_all
+                    quotation = await _get_quotation_or_404(db, quotation_id)
                     await _recalculate_quotation(db, quotation)
+                    await db.commit()
+                    _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
     except Exception as _auto_svc_err:
         import logging as _log2
         _log2.getLogger(__name__).warning("Auto-add booking service to quotation failed: %s", _auto_svc_err)
-        # Non-fatal — don't fail the whole appliance-add operation
-
-    await db.commit()
-    _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
+        # Non-fatal — appliance was already committed above
 
     return success_response(data={
         "appliance_label": label,
