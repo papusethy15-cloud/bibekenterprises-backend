@@ -26,7 +26,7 @@ class Commission(Base):
     status = Column(String(20), default="PENDING")  # PENDING, APPROVED, PAID
     payout_date = Column(DateTime(timezone=True))
     notes = Column(Text)
-    item_type     = Column(String(20), nullable=True)   # SERVICE | PART
+    item_type     = Column(String(50), nullable=True)   # SERVICE | PART
     item_name     = Column(String(300), nullable=True)
     item_quantity  = Column(Integer, default=1)
     part_source    = Column(String(30), nullable=True)  # OFFICE_STOCK | MARKET_PURCHASE
