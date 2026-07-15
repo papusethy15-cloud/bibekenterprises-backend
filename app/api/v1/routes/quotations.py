@@ -1148,6 +1148,33 @@ async def add_part_to_quotation(
             if tech_purchase_price > 0 and abs(tech_purchase_price - (inv_item.cost_price or 0)) > 0.01:
                 is_pending_verify = 1  # admin needs to review the new purchase price
 
+    # ── MARKET PURCHASE: no catalogue link + not explicitly flagged as new ──────
+    # Handles the edge case where technician submitted without ticking "is_new_part"
+    # but also provided no inventory_item_id.  Treat as a new part pending admin review.
+    elif payload.part_source == "MARKET_PURCHASE" and not payload.inventory_item_id and not payload.is_new_part:
+        existing = (await db.execute(
+            select(InventoryItem).where(
+                InventoryItem.name.ilike(payload.part_name.strip()),
+                InventoryItem.is_active == True,
+            )
+        )).scalar_one_or_none()
+        if existing:
+            inventory_item_id = existing.id
+            is_pending_verify = 1  # price review needed
+        else:
+            # Truly new part — create inactive placeholder
+            new_item = InventoryItem(
+                name=payload.part_name.strip(),
+                cost_price=payload.purchase_price or 0,
+                selling_price=payload.unit_price or 0,
+                current_stock=0,
+                is_active=False,
+            )
+            db.add(new_item)
+            await db.flush()
+            inventory_item_id = new_item.id
+            is_pending_verify = 1
+
     # ── NEW PART: add to inventory catalogue as pending-verify ────────────────
     elif payload.is_new_part and payload.part_source == "MARKET_PURCHASE":
         existing = (await db.execute(
