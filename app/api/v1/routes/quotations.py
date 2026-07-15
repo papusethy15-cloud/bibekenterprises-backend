@@ -1136,6 +1136,18 @@ async def add_part_to_quotation(
         if not payload.unit_price:
             payload = payload.model_copy(update={"unit_price": inv_item.selling_price or 0})
 
+    # ── MARKET PURCHASE: existing item with (possibly new) purchase price → flag for admin review
+    elif payload.part_source == "MARKET_PURCHASE" and payload.inventory_item_id and not payload.is_new_part:
+        inv_item = (await db.execute(
+            select(InventoryItem).where(InventoryItem.id == UUID(payload.inventory_item_id))
+        )).scalar_one_or_none()
+        if inv_item:
+            inventory_item_id = inv_item.id
+            # If technician's purchase price differs from catalogue cost_price → flag for admin to review/override
+            tech_purchase_price = payload.purchase_price or 0
+            if tech_purchase_price > 0 and abs(tech_purchase_price - (inv_item.cost_price or 0)) > 0.01:
+                is_pending_verify = 1  # admin needs to review the new purchase price
+
     # ── NEW PART: add to inventory catalogue as pending-verify ────────────────
     elif payload.is_new_part and payload.part_source == "MARKET_PURCHASE":
         existing = (await db.execute(
@@ -1155,6 +1167,10 @@ async def add_part_to_quotation(
             db.add(new_item)
             await db.flush()
             inventory_item_id = new_item.id
+            is_pending_verify = 1
+        else:
+            # Name matches existing item — link it and flag price review
+            inventory_item_id = existing.id
             is_pending_verify = 1
 
     item = QuotationPartItem(
