@@ -1795,6 +1795,7 @@ async def list_market_purchase_verifications(
     from app.models.inventory import InventoryItem
     from app.models.booking import Booking
     from app.models.user import User
+    from app.models.domain import Domain
 
     from app.models.quotation import PartSource as _PartSource
     stmt = (
@@ -1802,6 +1803,7 @@ async def list_market_purchase_verifications(
         .where(
             QuotationPartItem.is_pending_verify == 1,
             QuotationPartItem.part_source == _PartSource.MARKET_PURCHASE,
+            QuotationPartItem.is_active == True,   # exclude soft-deleted (removed) parts
         )
         .order_by(QuotationPartItem.created_at.desc())
     )
@@ -1817,12 +1819,33 @@ async def list_market_purchase_verifications(
                 select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
             )).scalar_one_or_none()
 
-        # Fetch quotation + booking info for context
+        # Fetch quotation → domain info for context
         quotation = (await db.execute(
             select(Quotation).where(Quotation.id == part.quotation_id)
         )).scalar_one_or_none()
 
         booking_id = str(quotation.booking_id) if quotation and quotation.booking_id else None
+
+        # Resolve domain: prefer quotation.domain_id, fallback to booking.domain_id
+        domain_id = None
+        domain_name = None
+        domain_slug = None
+        if quotation:
+            raw_domain_id = quotation.domain_id
+            if not raw_domain_id and quotation.booking_id:
+                booking_row = (await db.execute(
+                    select(Booking).where(Booking.id == quotation.booking_id)
+                )).scalar_one_or_none()
+                if booking_row:
+                    raw_domain_id = booking_row.domain_id
+            if raw_domain_id:
+                domain_row = (await db.execute(
+                    select(Domain).where(Domain.id == raw_domain_id)
+                )).scalar_one_or_none()
+                if domain_row:
+                    domain_id   = str(domain_row.id)
+                    domain_name = domain_row.name
+                    domain_slug = domain_row.slug
 
         results.append({
             "id": str(part.id),
@@ -1837,6 +1860,10 @@ async def list_market_purchase_verifications(
             "created_at": iso(part.created_at) if part.created_at else None,
             "quotation_id": str(part.quotation_id),
             "booking_id": booking_id,
+            # Domain context (which brand/domain this job belongs to)
+            "domain_id":   domain_id,
+            "domain_name": domain_name,
+            "domain_slug": domain_slug,
             # Existing catalogue item (if linked)
             "inventory_item": {
                 "id": str(inv_item.id),

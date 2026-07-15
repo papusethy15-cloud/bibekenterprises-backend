@@ -1270,6 +1270,32 @@ async def delete_part_from_quotation(
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     part.is_active = False
+
+    # If this was a pending-verify new part that created an inactive InventoryItem placeholder,
+    # and no other active quotation part references the same inventory item, remove the placeholder.
+    if part.is_pending_verify == 1 and part.inventory_item_id:
+        from app.models.inventory import InventoryItem
+        placeholder = (await db.execute(
+            select(InventoryItem).where(
+                InventoryItem.id == part.inventory_item_id,
+                InventoryItem.is_active == False,  # only clean up inactive placeholders
+            )
+        )).scalar_one_or_none()
+        if placeholder:
+            # Check if any other active quotation part still references this inventory item
+            other_refs = (await db.execute(
+                select(func.count()).select_from(
+                    select(QuotationPartItem).where(
+                        QuotationPartItem.inventory_item_id == placeholder.id,
+                        QuotationPartItem.is_active == True,
+                        QuotationPartItem.id != part.id,
+                    ).subquery()
+                )
+            )).scalar_one()
+            if other_refs == 0:
+                # Safe to remove — no other quotation uses this placeholder
+                await db.delete(placeholder)
+
     await _recalculate_quotation(db, quotation)
     await db.commit()
     _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
