@@ -351,6 +351,25 @@ class ReorderRuleRequest(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MARKET PURCHASE VERIFICATION (Admin reviews technician field purchases)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VerifyMarketPurchaseRequest(BaseModel):
+    action: str                          # "add_new" | "override_price" | "reject"
+    # For add_new: create brand-new inventory item
+    # For override_price: update cost_price (and optionally selling_price) on existing item
+    override_cost_price: Optional[float] = None
+    override_selling_price: Optional[float] = None
+    # For add_new only
+    new_item_name: Optional[str] = None
+    new_cost_price: Optional[float] = None
+    new_selling_price: Optional[float] = None
+    category_id: Optional[str] = None
+    sku: Optional[str] = None
+    notes: Optional[str] = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CATEGORIES
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1945,22 +1964,3 @@ async def booking_parts(booking_id: UUID, current_user: dict = Depends(AnyStaff)
 
 import json as _json
 from datetime import datetime as _dt
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MARKET PURCHASE VERIFICATION (Admin reviews technician field purchases)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class VerifyMarketPurchaseRequest(BaseModel):
-    action: str                          # "add_new" | "override_price" | "reject"
-    # For add_new: create brand-new inventory item
-    # For override_price: update cost_price (and optionally selling_price) on existing item
-    override_cost_price: Optional[float] = None
-    override_selling_price: Optional[float] = None
-    # For add_new only
-    new_item_name: Optional[str] = None
-    new_cost_price: Optional[float] = None
-    new_selling_price: Optional[float] = None
-    category_id: Optional[str] = None
-    sku: Optional[str] = None
-    notes: Optional[str] = None
