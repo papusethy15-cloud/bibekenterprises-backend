@@ -93,6 +93,7 @@ class QuotationPartItem(BaseModel):
     inventory_item_id = Column(UUID(as_uuid=True), ForeignKey("inventory_items.id"), nullable=True)
     # For new parts added by tech/admin — pending admin verification before cataloguing
     is_pending_verify = Column(Integer, default=0)  # 0=no, 1=pending, 2=verified
+    is_active = Column(Boolean, default=True, nullable=False)      # soft-delete: False = removed from quotation
     is_repeat_complaint = Column(Boolean, default=False)           # NEW: exclude from invoice total
 
 

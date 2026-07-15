@@ -1213,6 +1213,7 @@ async def add_part_to_quotation(
         notes=notes_str or None,
         inventory_item_id=inventory_item_id,
         is_pending_verify=is_pending_verify,
+        is_active=True,  # always active on creation; soft-deleted when technician removes it
     )
     db.add(item)
     await db.flush()
