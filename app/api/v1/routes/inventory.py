@@ -1042,6 +1042,192 @@ async def item_warehouse_stock(
     } for ws, wh in rows])
 
 
+@router.get("/market-purchase-verifications", summary="List pending market purchase parts [Admin]")
+async def list_market_purchase_verifications(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(30, le=100),
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns all QuotationPartItems with is_pending_verify=1 and part_source=MARKET_PURCHASE.
+    Includes the linked InventoryItem (if any) so admin can see catalogue price vs tech's purchase price.
+    """
+    from app.models.quotation import QuotationPartItem, Quotation
+    from app.models.inventory import InventoryItem
+    from app.models.booking import Booking
+    from app.models.user import User
+    from app.models.domain import Domain
+
+    from app.models.quotation import PartSource as _PartSource
+    stmt = (
+        select(QuotationPartItem)
+        .where(
+            QuotationPartItem.is_pending_verify == 1,
+            QuotationPartItem.part_source == _PartSource.MARKET_PURCHASE,
+            QuotationPartItem.is_active == True,   # exclude soft-deleted (removed) parts
+        )
+        .order_by(QuotationPartItem.created_at.desc())
+    )
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    rows = (await db.execute(stmt.offset((page - 1) * per_page).limit(per_page))).scalars().all()
+
+    results = []
+    for part in rows:
+        # Fetch linked inventory item
+        inv_item = None
+        if part.inventory_item_id:
+            inv_item = (await db.execute(
+                select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
+            )).scalar_one_or_none()
+
+        # Fetch quotation → domain info for context
+        quotation = (await db.execute(
+            select(Quotation).where(Quotation.id == part.quotation_id)
+        )).scalar_one_or_none()
+
+        booking_id = str(quotation.booking_id) if quotation and quotation.booking_id else None
+
+        # Resolve domain: prefer quotation.domain_id, fallback to booking.domain_id
+        domain_id = None
+        domain_name = None
+        domain_slug = None
+        if quotation:
+            raw_domain_id = quotation.domain_id
+            if not raw_domain_id and quotation.booking_id:
+                booking_row = (await db.execute(
+                    select(Booking).where(Booking.id == quotation.booking_id)
+                )).scalar_one_or_none()
+                if booking_row:
+                    raw_domain_id = booking_row.domain_id
+            if raw_domain_id:
+                domain_row = (await db.execute(
+                    select(Domain).where(Domain.id == raw_domain_id)
+                )).scalar_one_or_none()
+                if domain_row:
+                    domain_id   = str(domain_row.id)
+                    domain_name = domain_row.name
+                    domain_slug = domain_row.slug
+
+        results.append({
+            "id": str(part.id),
+            "part_name": part.part_name,
+            "part_source": part.part_source.value if hasattr(part.part_source, "value") else str(part.part_source),
+            "quantity": part.quantity,
+            "purchase_price": part.purchase_price,   # tech's stated purchase price
+            "sale_price": part.unit_price,            # tech's stated sale price
+            "total_price": part.total_price,
+            "vendor_name": part.vendor_name,
+            "bill_number": part.bill_number,
+            "created_at": iso(part.created_at) if part.created_at else None,
+            "quotation_id": str(part.quotation_id),
+            "booking_id": booking_id,
+            # Domain context (which brand/domain this job belongs to)
+            "domain_id":   domain_id,
+            "domain_name": domain_name,
+            "domain_slug": domain_slug,
+            # Existing catalogue item (if linked)
+            "inventory_item": {
+                "id": str(inv_item.id),
+                "name": inv_item.name,
+                "sku": inv_item.sku,
+                "cost_price": inv_item.cost_price,
+                "selling_price": inv_item.selling_price,
+                "is_active": inv_item.is_active,
+            } if inv_item else None,
+        })
+
+    return success_response(data={
+        "items": results,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+    })
+
+
+@router.post("/market-purchase-verifications/{part_id}/verify", summary="Verify / reject market purchase [Admin]")
+async def verify_market_purchase(
+    part_id: UUID,
+    payload: VerifyMarketPurchaseRequest,
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Admin verifies a technician's market purchase part:
+    - action="add_new"       → creates a new active InventoryItem from tech's details
+    - action="override_price" → updates cost_price (and optionally selling_price) on the linked item
+    - action="reject"        → marks part as rejected (is_pending_verify=3), no catalogue change
+    """
+    from app.models.quotation import QuotationPartItem
+    from app.models.inventory import InventoryItem
+
+    part = (await db.execute(
+        select(QuotationPartItem).where(QuotationPartItem.id == part_id)
+    )).scalar_one_or_none()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    if part.is_pending_verify != 1:
+        raise HTTPException(status_code=400, detail="Part is not pending verification")
+
+    action = payload.action.strip().lower()
+
+    if action == "add_new":
+        # Create a new active inventory item from tech's data
+        new_name = (payload.new_item_name or part.part_name).strip()
+        new_item = InventoryItem(
+            name=new_name,
+            cost_price=payload.new_cost_price if payload.new_cost_price is not None else (part.purchase_price or 0),
+            selling_price=payload.new_selling_price if payload.new_selling_price is not None else (part.unit_price or 0),
+            current_stock=0,
+            is_active=True,
+            category_id=UUID(payload.category_id) if payload.category_id else None,
+            sku=payload.sku or None,
+        )
+        db.add(new_item)
+        await db.flush()
+        part.inventory_item_id = new_item.id
+        part.is_pending_verify = 2  # verified
+        await db.commit()
+        return success_response(
+            data={"inventory_item_id": str(new_item.id), "name": new_item.name},
+            message=f"New item '{new_item.name}' added to inventory catalogue"
+        )
+
+    elif action == "override_price":
+        # Update existing linked item's prices
+        if not part.inventory_item_id:
+            raise HTTPException(status_code=400, detail="No linked inventory item to update price on")
+        inv_item = (await db.execute(
+            select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
+        )).scalar_one_or_none()
+        if not inv_item:
+            raise HTTPException(status_code=404, detail="Linked inventory item not found")
+
+        if payload.override_cost_price is not None:
+            inv_item.cost_price = payload.override_cost_price
+        if payload.override_selling_price is not None:
+            inv_item.selling_price = payload.override_selling_price
+        if not inv_item.is_active:
+            inv_item.is_active = True  # activate if it was pending
+
+        part.is_pending_verify = 2  # verified
+        await db.commit()
+        return success_response(
+            data={"inventory_item_id": str(inv_item.id), "name": inv_item.name,
+                  "new_cost_price": inv_item.cost_price, "new_selling_price": inv_item.selling_price},
+            message=f"Price updated for '{inv_item.name}'"
+        )
+
+    elif action == "reject":
+        part.is_pending_verify = 3  # rejected
+        await db.commit()
+        return success_response(message="Market purchase part rejected — no catalogue change made")
+
+    else:
+        raise HTTPException(status_code=400, detail="action must be 'add_new', 'override_price', or 'reject'")
+
+
 @router.get("/{item_id}", summary="Item detail [Staff]")
 async def get_item(item_id: UUID, current_user: dict = Depends(AnyStaff), db: AsyncSession = Depends(get_db)):
     item = await _get_item(item_id, db)
@@ -1778,190 +1964,3 @@ class VerifyMarketPurchaseRequest(BaseModel):
     category_id: Optional[str] = None
     sku: Optional[str] = None
     notes: Optional[str] = None
-
-
-@router.get("/market-purchase-verifications", summary="List pending market purchase parts [Admin]")
-async def list_market_purchase_verifications(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(30, le=100),
-    current_user: dict = Depends(AdminOnly),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Returns all QuotationPartItems with is_pending_verify=1 and part_source=MARKET_PURCHASE.
-    Includes the linked InventoryItem (if any) so admin can see catalogue price vs tech's purchase price.
-    """
-    from app.models.quotation import QuotationPartItem, Quotation
-    from app.models.inventory import InventoryItem
-    from app.models.booking import Booking
-    from app.models.user import User
-    from app.models.domain import Domain
-
-    from app.models.quotation import PartSource as _PartSource
-    stmt = (
-        select(QuotationPartItem)
-        .where(
-            QuotationPartItem.is_pending_verify == 1,
-            QuotationPartItem.part_source == _PartSource.MARKET_PURCHASE,
-            QuotationPartItem.is_active == True,   # exclude soft-deleted (removed) parts
-        )
-        .order_by(QuotationPartItem.created_at.desc())
-    )
-    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
-    rows = (await db.execute(stmt.offset((page - 1) * per_page).limit(per_page))).scalars().all()
-
-    results = []
-    for part in rows:
-        # Fetch linked inventory item
-        inv_item = None
-        if part.inventory_item_id:
-            inv_item = (await db.execute(
-                select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
-            )).scalar_one_or_none()
-
-        # Fetch quotation → domain info for context
-        quotation = (await db.execute(
-            select(Quotation).where(Quotation.id == part.quotation_id)
-        )).scalar_one_or_none()
-
-        booking_id = str(quotation.booking_id) if quotation and quotation.booking_id else None
-
-        # Resolve domain: prefer quotation.domain_id, fallback to booking.domain_id
-        domain_id = None
-        domain_name = None
-        domain_slug = None
-        if quotation:
-            raw_domain_id = quotation.domain_id
-            if not raw_domain_id and quotation.booking_id:
-                booking_row = (await db.execute(
-                    select(Booking).where(Booking.id == quotation.booking_id)
-                )).scalar_one_or_none()
-                if booking_row:
-                    raw_domain_id = booking_row.domain_id
-            if raw_domain_id:
-                domain_row = (await db.execute(
-                    select(Domain).where(Domain.id == raw_domain_id)
-                )).scalar_one_or_none()
-                if domain_row:
-                    domain_id   = str(domain_row.id)
-                    domain_name = domain_row.name
-                    domain_slug = domain_row.slug
-
-        results.append({
-            "id": str(part.id),
-            "part_name": part.part_name,
-            "part_source": part.part_source.value if hasattr(part.part_source, "value") else str(part.part_source),
-            "quantity": part.quantity,
-            "purchase_price": part.purchase_price,   # tech's stated purchase price
-            "sale_price": part.unit_price,            # tech's stated sale price
-            "total_price": part.total_price,
-            "vendor_name": part.vendor_name,
-            "bill_number": part.bill_number,
-            "created_at": iso(part.created_at) if part.created_at else None,
-            "quotation_id": str(part.quotation_id),
-            "booking_id": booking_id,
-            # Domain context (which brand/domain this job belongs to)
-            "domain_id":   domain_id,
-            "domain_name": domain_name,
-            "domain_slug": domain_slug,
-            # Existing catalogue item (if linked)
-            "inventory_item": {
-                "id": str(inv_item.id),
-                "name": inv_item.name,
-                "sku": inv_item.sku,
-                "cost_price": inv_item.cost_price,
-                "selling_price": inv_item.selling_price,
-                "is_active": inv_item.is_active,
-            } if inv_item else None,
-        })
-
-    return success_response(data={
-        "items": results,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    })
-
-
-@router.post("/market-purchase-verifications/{part_id}/verify", summary="Verify / reject market purchase [Admin]")
-async def verify_market_purchase(
-    part_id: UUID,
-    payload: VerifyMarketPurchaseRequest,
-    current_user: dict = Depends(AdminOnly),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Admin verifies a technician's market purchase part:
-    - action="add_new"       → creates a new active InventoryItem from tech's details
-    - action="override_price" → updates cost_price (and optionally selling_price) on the linked item
-    - action="reject"        → marks part as rejected (is_pending_verify=3), no catalogue change
-    """
-    from app.models.quotation import QuotationPartItem
-    from app.models.inventory import InventoryItem
-
-    part = (await db.execute(
-        select(QuotationPartItem).where(QuotationPartItem.id == part_id)
-    )).scalar_one_or_none()
-    if not part:
-        raise HTTPException(status_code=404, detail="Part not found")
-    if part.is_pending_verify != 1:
-        raise HTTPException(status_code=400, detail="Part is not pending verification")
-
-    action = payload.action.strip().lower()
-
-    if action == "add_new":
-        # Create a new active inventory item from tech's data
-        new_name = (payload.new_item_name or part.part_name).strip()
-        new_item = InventoryItem(
-            name=new_name,
-            cost_price=payload.new_cost_price if payload.new_cost_price is not None else (part.purchase_price or 0),
-            selling_price=payload.new_selling_price if payload.new_selling_price is not None else (part.unit_price or 0),
-            current_stock=0,
-            is_active=True,
-            category_id=UUID(payload.category_id) if payload.category_id else None,
-            sku=payload.sku or None,
-        )
-        db.add(new_item)
-        await db.flush()
-        part.inventory_item_id = new_item.id
-        part.is_pending_verify = 2  # verified
-        await db.commit()
-        return success_response(
-            data={"inventory_item_id": str(new_item.id), "name": new_item.name},
-            message=f"New item '{new_item.name}' added to inventory catalogue"
-        )
-
-    elif action == "override_price":
-        # Update existing linked item's prices
-        if not part.inventory_item_id:
-            raise HTTPException(status_code=400, detail="No linked inventory item to update price on")
-        inv_item = (await db.execute(
-            select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
-        )).scalar_one_or_none()
-        if not inv_item:
-            raise HTTPException(status_code=404, detail="Linked inventory item not found")
-
-        if payload.override_cost_price is not None:
-            inv_item.cost_price = payload.override_cost_price
-        if payload.override_selling_price is not None:
-            inv_item.selling_price = payload.override_selling_price
-        if not inv_item.is_active:
-            inv_item.is_active = True  # activate if it was pending
-
-        part.is_pending_verify = 2  # verified
-        await db.commit()
-        return success_response(
-            data={"inventory_item_id": str(inv_item.id), "name": inv_item.name,
-                  "new_cost_price": inv_item.cost_price, "new_selling_price": inv_item.selling_price},
-            message=f"Price updated for '{inv_item.name}'"
-        )
-
-    elif action == "reject":
-        part.is_pending_verify = 3  # rejected
-        await db.commit()
-        return success_response(message="Market purchase part rejected — no catalogue change made")
-
-    else:
-        raise HTTPException(status_code=400, detail="action must be 'add_new', 'override_price', or 'reject'")
-
