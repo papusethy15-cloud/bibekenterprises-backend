@@ -1242,6 +1242,8 @@ async def update_part_in_quotation(
     ).scalar_one_or_none()
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
+    old_quantity = part.quantity
+
     for field, value in payload.model_dump(exclude_none=True).items():
         if field == "part_source":
             setattr(part, field, PartSource(value))
@@ -1249,6 +1251,54 @@ async def update_part_in_quotation(
             setattr(part, field, value)
     if payload.quantity is not None or payload.unit_price is not None:
         part.total_price = round(part.quantity * part.unit_price)
+
+    # ── OFFICE_STOCK: adjust technician stock if quantity changed ─────────────
+    if payload.quantity is not None and payload.quantity != old_quantity and part.part_source.value == "OFFICE_STOCK" and part.inventory_item_id:
+        from app.models.inventory import InventoryItem, TechnicianStock, TechnicianStockLog, StockMovement, MovementType, TechnicianStockStatus
+        from app.models.booking import Booking
+        inv_item = (await db.execute(
+            select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
+        )).scalar_one_or_none()
+        booking = (await db.execute(select(Booking).where(Booking.id == quotation.booking_id))).scalar_one_or_none()
+        technician_id = booking.technician_id if booking else None
+        if inv_item and technician_id:
+            tech_stock = (await db.execute(
+                select(TechnicianStock).where(
+                    TechnicianStock.technician_id == technician_id,
+                    TechnicianStock.item_id == inv_item.id,
+                )
+            )).scalar_one_or_none()
+            qty_diff = payload.quantity - old_quantity  # positive = more consumed, negative = returned
+            if qty_diff > 0:
+                # More qty added: deduct from tech stock
+                avail = tech_stock.quantity if tech_stock else 0
+                if avail < qty_diff:
+                    raise HTTPException(status_code=400, detail=f"Insufficient technician stock. Available: {avail} {inv_item.unit}")
+                if tech_stock:
+                    tech_stock.quantity -= qty_diff
+                    tech_stock.consumed_qty = (tech_stock.consumed_qty or 0) + qty_diff
+                inv_item.reserved_stock = max(0, (inv_item.reserved_stock or 0) - qty_diff)
+                note = f"Qty increased in quotation {quotation.quotation_number}"
+            else:
+                # Qty decreased: return to tech stock
+                return_qty = abs(qty_diff)
+                if tech_stock:
+                    tech_stock.quantity += return_qty
+                    tech_stock.consumed_qty = max(0, (tech_stock.consumed_qty or 0) - return_qty)
+                else:
+                    db.add(TechnicianStock(technician_id=technician_id, item_id=inv_item.id, quantity=return_qty, consumed_qty=0))
+                inv_item.reserved_stock = (inv_item.reserved_stock or 0) + return_qty
+                note = f"Qty decreased in quotation {quotation.quotation_number}"
+            db.add(StockMovement(
+                item_id=inv_item.id,
+                movement_type=MovementType.CONSUMPTION.value,
+                quantity=-qty_diff,
+                technician_id=technician_id,
+                booking_id=booking.id if booking else None,
+                notes=note,
+                performed_by=UUID(current_user["user_id"]),
+            ))
+
     await _recalculate_quotation(db, quotation)
     await db.commit()
     _broadcast_quotation(quotation, WSEvent.QUOTATION_UPDATED, current_user["user_id"])
@@ -1271,6 +1321,54 @@ async def delete_part_from_quotation(
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
     part.is_active = False
+
+    # ── OFFICE_STOCK: reverse the stock deduction when technician removes the part ──
+    if part.part_source.value == "OFFICE_STOCK" and part.inventory_item_id:
+        from app.models.inventory import InventoryItem, TechnicianStock, TechnicianStockLog, StockMovement, MovementType, TechnicianStockStatus
+        from app.models.booking import Booking
+        inv_item = (await db.execute(
+            select(InventoryItem).where(InventoryItem.id == part.inventory_item_id)
+        )).scalar_one_or_none()
+        booking = (await db.execute(select(Booking).where(Booking.id == quotation.booking_id))).scalar_one_or_none()
+        technician_id = booking.technician_id if booking else None
+        if inv_item and technician_id:
+            tech_stock = (await db.execute(
+                select(TechnicianStock).where(
+                    TechnicianStock.technician_id == technician_id,
+                    TechnicianStock.item_id == inv_item.id,
+                )
+            )).scalar_one_or_none()
+            qty_to_return = part.quantity
+            if tech_stock:
+                tech_stock.quantity += qty_to_return
+                tech_stock.consumed_qty = max(0, (tech_stock.consumed_qty or 0) - qty_to_return)
+            else:
+                # Create a stock record if it doesn't exist (edge case)
+                db.add(TechnicianStock(
+                    technician_id=technician_id,
+                    item_id=inv_item.id,
+                    quantity=qty_to_return,
+                    consumed_qty=0,
+                ))
+            inv_item.reserved_stock = (inv_item.reserved_stock or 0) + qty_to_return
+            db.add(StockMovement(
+                item_id=inv_item.id,
+                movement_type=MovementType.CONSUMPTION.value,
+                quantity=+qty_to_return,  # positive = return
+                technician_id=technician_id,
+                booking_id=booking.id if booking else None,
+                notes=f"Reversed: part removed from quotation {quotation.quotation_number}",
+                performed_by=UUID(current_user["user_id"]),
+            ))
+            db.add(TechnicianStockLog(
+                technician_id=technician_id,
+                item_id=inv_item.id,
+                booking_id=booking.id if booking else None,
+                status=TechnicianStockStatus.RETURNED.value,
+                quantity=qty_to_return,
+                notes=f"Reversed: part removed from quotation {quotation.quotation_number}",
+                performed_by=UUID(current_user["user_id"]),
+            ))
 
     # If this was a pending-verify new part that created an inactive InventoryItem placeholder,
     # and no other active quotation part references the same inventory item, remove the placeholder.
