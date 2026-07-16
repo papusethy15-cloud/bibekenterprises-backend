@@ -1278,20 +1278,142 @@ async def delete_stock_movement(
     movement_id: UUID,
     current_user: dict = Depends(AdminOnly),
     db: AsyncSession = Depends(get_db),
+    force: bool = False,
 ):
     """
-    Delete a specific stock movement record (for correcting wrong entries
-    e.g. erroneously added stock from a failed market purchase verify action).
-    Also reverses the inventory_item current_stock if the movement was a stock-add type.
+    Implement 6: Delete a stock movement record with quotation-usage checks.
+    - If movement is linked to a quotation part (CONSUMPTION type with booking_id):
+        * If that quotation has been converted to an invoice → BLOCK deletion (409)
+        * Otherwise → return warning info so frontend can show confirmation dialog
+          then proceed with deletion AND reverse the quotation part + restore tech stock.
+    - For non-quotation movements: reverses the inventory current_stock and deletes.
+
+    Query param ?force=true skips the confirmation step and proceeds with deletion.
     """
-    from app.models.inventory import StockMovement, InventoryItem
+    from app.models.inventory import StockMovement, InventoryItem, TechnicianStock, TechnicianStockLog, TechnicianStockStatus
+    from sqlalchemy import text as _sa_text
+
     movement = (await db.execute(
         select(StockMovement).where(StockMovement.id == movement_id)
     )).scalar_one_or_none()
     if not movement:
         raise HTTPException(status_code=404, detail="Movement not found")
 
-    # Reverse the stock impact — subtract what was added
+    # ── Implement 6: Check if this movement is linked to a quotation part ─────
+    quotation_info = None
+    invoice_info = None
+    quotation_part_id = None
+
+    if movement.booking_id and movement.item_id and "quotation" in (movement.notes or "").lower():
+        # Try to find the quotation part that consumed this stock
+        try:
+            from app.models.quotation import QuotationPartItem, PartSource, Quotation, QuotationStatus
+            from app.models.invoice import Invoice
+
+            # Find active OFFICE_STOCK quotation part for this booking + item
+            part = (await db.execute(
+                select(QuotationPartItem).where(
+                    QuotationPartItem.inventory_item_id == movement.item_id,
+                    QuotationPartItem.is_active == True,
+                    QuotationPartItem.part_source == PartSource.OFFICE_STOCK,
+                ).join(Quotation, Quotation.id == QuotationPartItem.quotation_id).where(
+                    Quotation.booking_id == movement.booking_id,
+                    Quotation.is_active == True,
+                )
+            )).scalar_one_or_none()
+
+            if part:
+                quotation_part_id = part.id
+                quotation = (await db.execute(
+                    select(Quotation).where(Quotation.id == part.quotation_id)
+                )).scalar_one_or_none()
+                if quotation:
+                    quotation_info = {
+                        "quotation_id": str(quotation.id),
+                        "quotation_number": quotation.quotation_number,
+                        "status": quotation.status.value,
+                        "part_name": part.part_name,
+                        "part_qty": part.quantity,
+                    }
+                    # Check if converted to invoice
+                    invoice = (await db.execute(
+                        select(Invoice).where(
+                            Invoice.quotation_id == quotation.id,
+                            Invoice.is_active == True,
+                        )
+                    )).scalar_one_or_none()
+                    if invoice:
+                        invoice_info = {
+                            "invoice_id": str(invoice.id),
+                            "invoice_number": invoice.invoice_number,
+                            "status": invoice.status.value,
+                        }
+                        # Block deletion — quotation has been invoiced
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "error": "INVOICED_QUOTATION",
+                                "message": f"Cannot delete: this movement is used in quotation {quotation.quotation_number} which has been converted to invoice {invoice.invoice_number}. Remove the invoice first.",
+                                "quotation": quotation_info,
+                                "invoice": invoice_info,
+                            }
+                        )
+
+                    # Not invoiced yet — return warning so frontend can confirm
+                    if not force:
+                        return success_response(
+                            data={
+                                "requires_confirmation": True,
+                                "quotation": quotation_info,
+                                "warning": f"This movement is used in quotation {quotation.quotation_number} (status: {quotation.status.value}). Deleting will remove the part from the quotation and restore {part.quantity} × {part.part_name} back to the technician's assigned stock. Proceed?",
+                            },
+                            message="Confirmation required before deletion"
+                        )
+
+                    # force=True: delete the quotation part and restore tech stock
+                    if movement.technician_id:
+                        inv_item_for_restore = (await db.execute(
+                            select(InventoryItem).where(InventoryItem.id == movement.item_id)
+                        )).scalar_one_or_none()
+                        if inv_item_for_restore:
+                            tech_stock = (await db.execute(
+                                select(TechnicianStock).where(
+                                    TechnicianStock.technician_id == movement.technician_id,
+                                    TechnicianStock.item_id == movement.item_id,
+                                )
+                            )).scalar_one_or_none()
+                            if tech_stock:
+                                tech_stock.quantity += part.quantity
+                                tech_stock.consumed_qty = max(0, (tech_stock.consumed_qty or 0) - part.quantity)
+                            else:
+                                db.add(TechnicianStock(
+                                    technician_id=movement.technician_id,
+                                    item_id=movement.item_id,
+                                    quantity=part.quantity,
+                                    consumed_qty=0,
+                                ))
+                            inv_item_for_restore.reserved_stock = (inv_item_for_restore.reserved_stock or 0) + part.quantity
+                            db.add(TechnicianStockLog(
+                                technician_id=movement.technician_id,
+                                item_id=movement.item_id,
+                                booking_id=movement.booking_id,
+                                status=TechnicianStockStatus.RETURNED.value,
+                                quantity=part.quantity,
+                                notes=f"Ledger delete: part removed from quotation {quotation.quotation_number} by admin",
+                                performed_by=None,
+                            ))
+                    # Soft-delete the quotation part
+                    part.is_active = False
+                    # Recalculate quotation totals
+                    from app.api.v1.routes.quotations import _recalculate_quotation
+                    await _recalculate_quotation(db, quotation)
+        except HTTPException:
+            raise
+        except Exception as _chk_err:
+            import logging as _log6
+            _log6.getLogger(__name__).warning(f"Ledger delete quotation check failed: {_chk_err}")
+
+    # ── Reverse the stock impact on InventoryItem.current_stock ───────────────
     if movement.item_id and movement.quantity:
         inv_item = (await db.execute(
             select(InventoryItem).where(InventoryItem.id == movement.item_id)

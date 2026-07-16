@@ -52,11 +52,98 @@ async def _get_booking_or_404(db: AsyncSession, booking_id: UUID) -> Booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     return booking
 
+async def _return_office_stock_on_cancel(db: AsyncSession, booking: Booking) -> None:
+    """
+    Implement 5: When a booking is cancelled, return all OFFICE_STOCK parts used in
+    active quotations back to the technician's assigned stock.
+    """
+    try:
+        from app.models.quotation import Quotation as _Q5, QuotationPartItem as _QPI5, PartSource as _PS5
+        from app.models.inventory import InventoryItem as _II5, TechnicianStock as _TS5, TechnicianStockLog as _TSL5, StockMovement as _SM5, MovementType as _MT5, TechnicianStockStatus as _TSS5
+
+        if not booking.technician_id:
+            return
+
+        quotations = (await db.execute(
+            select(_Q5).where(
+                _Q5.booking_id == booking.id,
+                _Q5.is_active == True,
+            )
+        )).scalars().all()
+
+        for quotation in quotations:
+            office_parts = (await db.execute(
+                select(_QPI5).where(
+                    _QPI5.quotation_id == quotation.id,
+                    _QPI5.is_active == True,
+                    _QPI5.part_source == _PS5.OFFICE_STOCK,
+                    _QPI5.inventory_item_id.isnot(None),
+                )
+            )).scalars().all()
+
+            for part in office_parts:
+                inv_item = (await db.execute(
+                    select(_II5).where(_II5.id == part.inventory_item_id)
+                )).scalar_one_or_none()
+                if not inv_item:
+                    continue
+
+                qty_to_return = part.quantity
+                if qty_to_return <= 0:
+                    continue
+
+                tech_stock = (await db.execute(
+                    select(_TS5).where(
+                        _TS5.technician_id == booking.technician_id,
+                        _TS5.item_id == inv_item.id,
+                    )
+                )).scalar_one_or_none()
+
+                if tech_stock:
+                    tech_stock.quantity += qty_to_return
+                    tech_stock.consumed_qty = max(0, (tech_stock.consumed_qty or 0) - qty_to_return)
+                else:
+                    db.add(_TS5(
+                        technician_id=booking.technician_id,
+                        item_id=inv_item.id,
+                        quantity=qty_to_return,
+                        consumed_qty=0,
+                    ))
+
+                inv_item.reserved_stock = (inv_item.reserved_stock or 0) + qty_to_return
+
+                db.add(_SM5(
+                    item_id=inv_item.id,
+                    movement_type=_MT5.CONSUMPTION.value,
+                    quantity=+qty_to_return,
+                    technician_id=booking.technician_id,
+                    booking_id=booking.id,
+                    notes=f"Booking {booking.booking_number} cancelled — office stock returned from quotation {quotation.quotation_number}",
+                    performed_by=None,
+                ))
+                db.add(_TSL5(
+                    technician_id=booking.technician_id,
+                    item_id=inv_item.id,
+                    booking_id=booking.id,
+                    status=_TSS5.RETURNED.value,
+                    quantity=qty_to_return,
+                    notes=f"Booking cancelled — returned from quotation {quotation.quotation_number}",
+                    performed_by=None,
+                ))
+                # Soft-delete to prevent double-return on repeated cancel calls
+                part.is_active = False
+    except Exception as _stock_err:
+        import logging as _log5
+        _log5.getLogger(__name__).warning(f"_return_office_stock_on_cancel failed: {_stock_err}")
+
+
 async def _cancel_booking(db: AsyncSession, booking: Booking, user_id: str, reason: str):
     """Authoritative, immediate cancellation — only for admin/CCO callers."""
     NON_CANCELLABLE = [BookingStatus.COMPLETED, BookingStatus.CANCELLED, BookingStatus.CLOSED, BookingStatus.SETTLED]
     if booking.status in NON_CANCELLABLE:
         raise HTTPException(status_code=400, detail=f"Cannot cancel booking in {booking.status.value} state")
+    # Implement 5: Return office stock parts to technician before cancelling
+    await _return_office_stock_on_cancel(db, booking)
     booking.status = BookingStatus.CANCELLED
     booking.cancelled_reason = reason
     booking.pre_cancel_status = None
@@ -1503,6 +1590,10 @@ async def initiate_visiting_charge(
     def _inum():
         suffix = _dt.utcnow().strftime("%Y%m%d%H%M%S%f")[-10:]
         return f"INV{suffix}"
+
+    # Implement 5: Return any office stock parts from existing quotations back to technician
+    # (visiting charge = customer declined, so used parts go back to tech's inventory)
+    await _return_office_stock_on_cancel(db, booking)
 
     # ── Create visiting-charge quotation (pre-approved) ───────────────────────
     tax_amount = round(amount * 0.18)

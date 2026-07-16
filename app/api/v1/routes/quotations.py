@@ -1392,7 +1392,12 @@ async def delete_part_from_quotation(
                 )
             )).scalar_one()
             if other_refs == 0:
-                # Safe to remove — no other quotation uses this placeholder
+                # FIX Implement 1: Null out FK reference on this part FIRST to avoid FK constraint
+                # violation when deleting the placeholder InventoryItem — without this, the
+                # db.delete(placeholder) raises an IntegrityError (FK still points to it),
+                # rolling back the entire transaction and leaving the part visible in the quotation.
+                part.inventory_item_id = None
+                await db.flush()  # flush the FK null before delete
                 await db.delete(placeholder)
 
     await _recalculate_quotation(db, quotation)
