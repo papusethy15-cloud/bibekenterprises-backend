@@ -25,6 +25,7 @@ from app.api.v1.schemas.payment import (
     CreateOrderRequest,
     GeneratePaymentLinkRequest,
     GeneratePaymentQRRequest,
+    UpdatePayLaterRequest,
     VerifyPaymentRequest,
 )
 from app.core.config import settings
@@ -548,6 +549,35 @@ async def generate_payment_qr(
     await db.flush()
     await db.commit()
     return success_response(data=_payment_summary(transaction), message="Payment QR generated successfully")
+
+
+# ── Update Pay Later reminder date ──────────────────────────────────────────
+@router.patch("/{transaction_id}/update-pay-later", summary="Update Pay Later reminder date [Technician/CCO/Admin]")
+async def update_pay_later_date(
+    transaction_id: str,
+    payload: UpdatePayLaterRequest,
+    current_user: dict = Depends(AnyAuthenticated),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the due_collect_at date on an existing PAY_LATER PENDING transaction.
+    Only the technician who created it, or admin/CCO, can update it.
+    """
+    transaction = await _get_transaction_or_404(db, UUID(transaction_id))
+    if transaction.method != PaymentMethod.PAY_LATER or transaction.status != PaymentStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PENDING PAY_LATER transactions can have their reminder date updated.",
+        )
+    role = current_user["role"]
+    # Technician can only update their own; admin/CCO can update any
+    if role == "TECHNICIAN" and str(transaction.created_by) != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="You can only update reminders you created.")
+
+    transaction.due_collect_at = payload.due_collect_at
+    if payload.notes:
+        transaction.notes = payload.notes
+    await db.commit()
+    return success_response(data=_payment_summary(transaction), message="Pay Later reminder date updated successfully")
 
 
 @router.get("/history", summary="Transaction history")

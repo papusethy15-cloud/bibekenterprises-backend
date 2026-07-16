@@ -51,3 +51,8 @@ class GeneratePaymentQRRequest(BaseModel):
     invoice_id: str
     amount: Optional[float] = None
     notes: Optional[str] = None
+
+
+class UpdatePayLaterRequest(BaseModel):
+    due_collect_at: datetime
+    notes: Optional[str] = None
