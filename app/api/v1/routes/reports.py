@@ -502,6 +502,20 @@ async def technician_detail_report(
         "created_at":        _iso(c.created_at),
     } for c in commission_rows]
 
+    # ── Attendance for this technician in range ────────────────────────────
+    from app.models.attendance import AttendanceRecord
+    attendance_rows = (await db.execute(
+        select(AttendanceRecord).where(
+            AttendanceRecord.technician_id == tid,
+            AttendanceRecord.date >= sd,
+            AttendanceRecord.date <= ed,
+        ).order_by(AttendanceRecord.date.desc())
+    )).scalars().all()
+
+    att_present     = sum(1 for a in attendance_rows if (a.status or "PRESENT") == "PRESENT")
+    att_absent      = sum(1 for a in attendance_rows if (a.status or "") == "ABSENT")
+    att_total_hours = round(sum((a.accumulated_seconds or 0) for a in attendance_rows) / 3600, 2)
+
     return success_response(data={
         "technician": {
             "id":      str(tech.id),
