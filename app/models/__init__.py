@@ -21,7 +21,7 @@ from app.models.referral import Referral
 from app.models.inventory import InventoryCategory, InventoryItem, Warehouse, WarehouseStock, StockMovement
 from app.models.notification import Notification, NotificationTemplate
 from app.models.wallet import Wallet, WalletTransaction
-from app.models.commission import CommissionRule, Commission
+from app.models.commission import CommissionRule, Commission, CommissionGroup, CommissionGroupRule, CommissionGroupAssignment, CommissionGroupPartRule, SalarySettlement
 from app.models.coupon import Coupon, CouponUsage
 from app.models.attendance import Attendance, LeaveRequest
 from app.models.appliance import ApplianceBrand, ApplianceType, CustomerAppliance, BrandCategory

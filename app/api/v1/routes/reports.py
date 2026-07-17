@@ -556,6 +556,23 @@ async def technician_detail_report(
             "total_paid":     int(round(total_commission_paid)),
             "total_records":  len(commission_rows),
         },
+        "attendance_summary": {
+            "total_days":   len(attendance_rows),
+            "present_days": att_present,
+            "absent_days":  att_absent,
+            "total_hours":  att_total_hours,
+        },
+        "attendance": [
+            {
+                "date":         str(a.date),
+                "status":       a.status,
+                "hours_worked": round((a.accumulated_seconds or 0) / 3600, 2),
+                "check_in":     _iso(a.check_in)  if a.check_in  else None,
+                "check_out":    _iso(a.check_out) if a.check_out else None,
+                "notes":        a.notes,
+            }
+            for a in attendance_rows
+        ],
     })
 
 

@@ -40,26 +40,29 @@ class CommissionGroup(Base):
     name        = Column(String(150), nullable=False)
     description = Column(String(500), nullable=True)
     is_active   = Column(Boolean, default=True)
+    # Salary group flag
+    is_salary_group  = Column(Boolean, default=False)
+    # Salary structure (only used when is_salary_group=True)
+    monthly_salary   = Column(Float, nullable=True)
+    petrol_amount    = Column(Float, default=0.0)
+    mobile_recharge  = Column(Float, default=0.0)
+    bonus_amount     = Column(Float, default=0.0)
+    hra_amount       = Column(Float, default=0.0)
+    other_allowances = Column(Float, default=0.0)
+    salary_notes     = Column(String(500), nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
     updated_at  = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class CommissionGroupRule(Base):
-    """One rule per service inside a commission group.
-
-    Priority of effective price used for commission:
-      1. domain_id + service_id city price (if domain linked to a city)
-      2. city_id price from service_city_prices
-      3. service.base_price
-    """
+    """One rule per service inside a commission group."""
     __tablename__ = "commission_group_rules"
     id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     group_id        = Column(UUID(as_uuid=True), ForeignKey("commission_groups.id", ondelete="CASCADE"), nullable=False)
     service_id      = Column(UUID(as_uuid=True), ForeignKey("services.id", ondelete="CASCADE"), nullable=False)
-    # Optional domain scope — if set, this rule applies only for jobs via that domain
     domain_id       = Column(UUID(as_uuid=True), ForeignKey("domains.id",   ondelete="CASCADE"), nullable=True)
     commission_type = Column(String(20), nullable=False, default="PERCENTAGE")  # PERCENTAGE | FLAT
-    rate            = Column(Float, nullable=False, default=0.0)  # % or flat ₹
+    rate            = Column(Float, nullable=False, default=0.0)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -74,18 +77,45 @@ class CommissionGroupAssignment(Base):
 
 
 class CommissionGroupPartRule(Base):
-    """Per-spare-part commission rule inside a commission group.
-
-    part_source_filter: NULL = applies to both OFFICE_STOCK and MARKET_PURCHASE
-                        'OFFICE_STOCK'    = only office-stock parts
-                        'MARKET_PURCHASE' = only market-purchased parts
-    commission_type: PERCENTAGE (of sale price) | FLAT (flat ₹ per unit)
-    """
+    """Per-spare-part commission rule inside a commission group."""
     __tablename__ = "commission_group_part_rules"
     id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     group_id        = Column(UUID(as_uuid=True), ForeignKey("commission_groups.id", ondelete="CASCADE"), nullable=False)
-    part_name_match = Column(String(200), nullable=True)   # NULL = matches ALL parts; or keyword match
-    part_source_filter = Column(String(30), nullable=True) # NULL | OFFICE_STOCK | MARKET_PURCHASE
-    commission_type = Column(String(20), nullable=False, default="PERCENTAGE")  # PERCENTAGE | FLAT
+    part_name_match = Column(String(200), nullable=True)
+    part_source_filter = Column(String(30), nullable=True)
+    commission_type = Column(String(20), nullable=False, default="PERCENTAGE")
     rate            = Column(Float, nullable=False, default=0.0)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class SalarySettlement(Base):
+    """Monthly salary settlement for a salary-group technician."""
+    __tablename__ = "salary_settlements"
+    id                   = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    technician_id        = Column(UUID(as_uuid=True), ForeignKey("technicians.id", ondelete="CASCADE"), nullable=False)
+    commission_group_id  = Column(UUID(as_uuid=True), ForeignKey("commission_groups.id", ondelete="SET NULL"), nullable=True)
+    month                = Column(Integer, nullable=False)
+    year                 = Column(Integer, nullable=False)
+    monthly_salary       = Column(Float, default=0.0)
+    petrol_amount        = Column(Float, default=0.0)
+    mobile_recharge      = Column(Float, default=0.0)
+    bonus_amount         = Column(Float, default=0.0)
+    hra_amount           = Column(Float, default=0.0)
+    other_allowances     = Column(Float, default=0.0)
+    deductions           = Column(Float, default=0.0)
+    deduction_notes      = Column(String(500), nullable=True)
+    market_reimbursement = Column(Float, default=0.0)
+    gross_salary         = Column(Float, default=0.0)
+    net_salary           = Column(Float, default=0.0)
+    total_bookings       = Column(Integer, default=0)
+    total_hours_worked   = Column(Float, default=0.0)
+    attendance_days      = Column(Integer, default=0)
+    status               = Column(String(30), default="GENERATED")  # GENERATED | PAID | SENT_TO_BANK
+    admin_notes          = Column(String(500), nullable=True)
+    paid_at              = Column(DateTime(timezone=True), nullable=True)
+    wallet_txn_id        = Column(UUID(as_uuid=True), ForeignKey("wallet_transactions.id", ondelete="SET NULL"), nullable=True)
+    payment_reference    = Column(String(300), nullable=True)
+    payout_method        = Column(String(30), nullable=True)   # UPI | BANK
+    created_by           = Column(UUID(as_uuid=True), nullable=True)
+    created_at           = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at           = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -2169,13 +2169,30 @@ async def commission_preview(
                 "match_status": match_status,
             })
 
+    # ── Salary group: only show MARKET_PURCHASE part reimbursements ─────────
+    is_salary = bool(group and getattr(group, "is_salary_group", False))
+    if is_salary:
+        # Filter: keep only MARKET_PURCHASE part items (for reimbursement display)
+        line_items = [
+            item for item in line_items
+            if item["type"] == "PART" and item.get("part_source") == "MARKET_PURCHASE"
+        ]
+        # For salary group: no commission — only purchase reimbursement matters
+        for item in line_items:
+            item["commission_amount"] = 0  # no profit commission for salary tech
+            item["match_status"] = "salary"
+
     # Total payout = commission on all items + purchase reimbursement on MARKET parts
     total_commission = sum(item["commission_amount"] for item in line_items if item["commission_amount"] is not None)
     total_reimbursement = sum(item.get("purchase_reimbursement", 0) for item in line_items)
     return success_response(data={
         "technician": {"id": str(tech.id), "name": tech.name, "user_id": str(tech.user_id)} if tech else None,
-        "commission_group": {"id": str(group.id), "name": group.name} if group else None,
+        "commission_group": {
+            "id": str(group.id), "name": group.name,
+            "is_salary_group": bool(getattr(group, "is_salary_group", False)),
+        } if group else None,
         "line_items": line_items,
+        "is_salary_group": is_salary,
         "total_commission": int(round(total_commission)),
         "total_reimbursement": int(round(total_reimbursement)),
         "total_payout": int(round(total_commission + total_reimbursement)),
@@ -2318,8 +2335,24 @@ async def settle_booking(
                                 "is_repeat_complaint": bool(getattr(pi, "is_repeat_complaint", False)),
                                 "appliance_label": None})
 
-    # Apply admin overrides
-    override_map = {o["item_index"]: o["commission_amount"] for o in (payload.overrides or [])}
+    # ── Salary group: strip service items & non-MARKET_PURCHASE parts ───────────
+    _is_salary = bool(group and getattr(group, "is_salary_group", False))
+    if _is_salary:
+        # Only keep MARKET_PURCHASE part items — these need purchase reimbursement
+        line_items = [
+            item for item in line_items
+            if item["type"] == "PART" and item.get("part_source") == "MARKET_PURCHASE"
+        ]
+        # Zero out any commission for salary technicians — only reimbursement matters
+        for item in line_items:
+            item["commission_amount"] = 0
+        # Clear admin overrides for salary group (not applicable)
+        payload_overrides = []
+    else:
+        payload_overrides = payload.overrides or []
+
+    # Apply admin overrides (commission-based groups only)
+    override_map = {o["item_index"]: o["commission_amount"] for o in payload_overrides}
     for idx, item in enumerate(line_items):
         if idx in override_map:
             item["commission_amount"] = override_map[idx]
@@ -2428,39 +2461,59 @@ async def settle_booking(
     # Save Commission records per line (normal, non-repeat items only)
     # For MARKET_PURCHASE parts: two records — PURCHASE_REIMBURSEMENT + commission on profit.
     # For OFFICE_STOCK parts / services: one record — commission on profit only.
+    # SALARY GROUP: only PURCHASE_REIMBURSEMENT records for MARKET_PURCHASE parts;
+    # if no market parts → no records saved, booking closes cleanly.
     if tech:
-        for item in normal_items:
-            # 1. Main commission record (profit commission or manual override)
-            db.add(Commission(
-                technician_id=tech.id,
-                booking_id=booking.id,
-                base_amount=item["total_price"],
-                commission_amount=item["commission_amount"],
-                status="PENDING",  # Wallet credited only after admin confirms payment on Commissions page
-                item_type=item["type"],
-                item_name=item["name"],
-                item_quantity=item["quantity"],
-                part_source=item["part_source"],
-                notes=(
-                    f"Settled: {item['commission_type']} {item['rate']}% profit commission on {item['name']}"
-                    if item.get("rate") else f"Manual override: ₹{item['commission_amount']}"
-                ),
-            ))
-            # 2. Purchase reimbursement for MARKET_PURCHASE parts (tech paid from own pocket)
-            reimb = item.get("purchase_reimbursement", 0) or 0
-            if reimb > 0:
+        if _is_salary:
+            # line_items already filtered to MARKET_PURCHASE only (above)
+            for item in line_items:
+                reimb = item.get("purchase_reimbursement", 0) or 0
+                if reimb > 0:
+                    db.add(Commission(
+                        technician_id=tech.id,
+                        booking_id=booking.id,
+                        base_amount=item["total_price"],
+                        commission_amount=reimb,
+                        status="PENDING",
+                        item_type="PURCHASE_REIMBURSEMENT",
+                        item_name=item["name"],
+                        item_quantity=item["quantity"],
+                        part_source=item["part_source"],
+                        notes=f"[SALARY GROUP] Market part purchase reimbursement: ₹{item.get('purchase_price', 0)} × {item['quantity']} unit(s) — {item['name']}",
+                    ))
+        else:
+            for item in normal_items:
+                # 1. Main commission record (profit commission or manual override)
                 db.add(Commission(
                     technician_id=tech.id,
                     booking_id=booking.id,
                     base_amount=item["total_price"],
-                    commission_amount=reimb,
-                    status="PENDING",
-                    item_type="PURCHASE_REIMBURSEMENT",
+                    commission_amount=item["commission_amount"],
+                    status="PENDING",  # Wallet credited only after admin confirms payment on Commissions page
+                    item_type=item["type"],
                     item_name=item["name"],
                     item_quantity=item["quantity"],
                     part_source=item["part_source"],
-                    notes=f"Market part purchase reimbursement: ₹{item.get('purchase_price', 0)} × {item['quantity']} unit(s) — {item['name']}",
+                    notes=(
+                        f"Settled: {item['commission_type']} {item['rate']}% profit commission on {item['name']}"
+                        if item.get("rate") else f"Manual override: ₹{item['commission_amount']}"
+                    ),
                 ))
+                # 2. Purchase reimbursement for MARKET_PURCHASE parts (tech paid from own pocket)
+                reimb = item.get("purchase_reimbursement", 0) or 0
+                if reimb > 0:
+                    db.add(Commission(
+                        technician_id=tech.id,
+                        booking_id=booking.id,
+                        base_amount=item["total_price"],
+                        commission_amount=reimb,
+                        status="PENDING",
+                        item_type="PURCHASE_REIMBURSEMENT",
+                        item_name=item["name"],
+                        item_quantity=item["quantity"],
+                        part_source=item["part_source"],
+                        notes=f"Market part purchase reimbursement: ₹{item.get('purchase_price', 0)} × {item['quantity']} unit(s) — {item['name']}",
+                    ))
         # NOTE: Wallet is NOT credited here. The technician's wallet is credited
         # only when admin clicks "Mark Paid" (Confirm Payment) on the Commissions page.
 

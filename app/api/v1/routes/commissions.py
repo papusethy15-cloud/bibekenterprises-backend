@@ -24,15 +24,31 @@ class GroupRuleIn(BaseModel):
     rate:            float = 0.0
 
 class CreateGroupRequest(BaseModel):
-    name:        str
-    description: Optional[str] = None
-    rules:       List[GroupRuleIn] = []
+    name:             str
+    description:      Optional[str] = None
+    is_salary_group:  bool = False
+    monthly_salary:   Optional[float] = None
+    petrol_amount:    Optional[float] = 0.0
+    mobile_recharge:  Optional[float] = 0.0
+    bonus_amount:     Optional[float] = 0.0
+    hra_amount:       Optional[float] = 0.0
+    other_allowances: Optional[float] = 0.0
+    salary_notes:     Optional[str] = None
+    rules:            List[GroupRuleIn] = []
 
 class UpdateGroupRequest(BaseModel):
-    name:        Optional[str] = None
-    description: Optional[str] = None
-    is_active:   Optional[bool] = None
-    rules:       Optional[List[GroupRuleIn]] = None
+    name:             Optional[str] = None
+    description:      Optional[str] = None
+    is_active:        Optional[bool] = None
+    is_salary_group:  Optional[bool] = None
+    monthly_salary:   Optional[float] = None
+    petrol_amount:    Optional[float] = None
+    mobile_recharge:  Optional[float] = None
+    bonus_amount:     Optional[float] = None
+    hra_amount:       Optional[float] = None
+    other_allowances: Optional[float] = None
+    salary_notes:     Optional[str] = None
+    rules:            Optional[List[GroupRuleIn]] = None
 
 class PartRuleIn(BaseModel):
     part_name_match:    Optional[str] = None
@@ -368,7 +384,12 @@ async def list_groups(current_user: dict = Depends(AdminOnly), db: AsyncSession 
         grules = rules_by_group.get(str(g.id), [])
         result.append({
             "id": str(g.id), "name": g.name, "description": g.description,
-            "is_active": g.is_active, "technician_count": tech_count,
+            "is_active": g.is_active, "is_salary_group": bool(g.is_salary_group),
+            "monthly_salary": g.monthly_salary, "petrol_amount": g.petrol_amount or 0,
+            "mobile_recharge": g.mobile_recharge or 0, "bonus_amount": g.bonus_amount or 0,
+            "hra_amount": g.hra_amount or 0, "other_allowances": g.other_allowances or 0,
+            "salary_notes": g.salary_notes,
+            "technician_count": tech_count,
             "created_at": iso(g.created_at) if g.created_at else None,
             "rules": [{
                 "id":              str(r.id),
@@ -385,9 +406,21 @@ async def list_groups(current_user: dict = Depends(AdminOnly), db: AsyncSession 
 @router.post("/groups", summary="Create commission group [Admin]")
 async def create_group(payload: CreateGroupRequest, current_user: dict = Depends(AdminOnly), db: AsyncSession = Depends(get_db)):
     from app.models.commission import CommissionGroup, CommissionGroupRule
-    g = CommissionGroup(name=payload.name, description=payload.description)
+    g = CommissionGroup(
+        name=payload.name, description=payload.description,
+        is_salary_group=bool(payload.is_salary_group),
+        monthly_salary=payload.monthly_salary,
+        petrol_amount=payload.petrol_amount or 0,
+        mobile_recharge=payload.mobile_recharge or 0,
+        bonus_amount=payload.bonus_amount or 0,
+        hra_amount=payload.hra_amount or 0,
+        other_allowances=payload.other_allowances or 0,
+        salary_notes=payload.salary_notes,
+    )
     db.add(g); await db.flush()
-    for r in payload.rules:
+    # Salary groups don't have service/part commission rules
+    rules_to_save = [] if payload.is_salary_group else payload.rules
+    for r in rules_to_save:
         db.add(CommissionGroupRule(
             group_id=g.id, service_id=UUID(r.service_id),
             domain_id=UUID(r.domain_id) if r.domain_id else None,
@@ -441,7 +474,12 @@ async def get_group(group_id: UUID, current_user: dict = Depends(AdminOnly), db:
         }
 
     return success_response(data={
-        "id": str(g.id), "name": g.name, "description": g.description, "is_active": g.is_active,
+        "id": str(g.id), "name": g.name, "description": g.description,
+        "is_active": g.is_active, "is_salary_group": bool(g.is_salary_group),
+        "monthly_salary": g.monthly_salary, "petrol_amount": g.petrol_amount or 0,
+        "mobile_recharge": g.mobile_recharge or 0, "bonus_amount": g.bonus_amount or 0,
+        "hra_amount": g.hra_amount or 0, "other_allowances": g.other_allowances or 0,
+        "salary_notes": g.salary_notes,
         "rules": [_enrich_rule(r) for r in rules],
         "technicians": techs,
     })
@@ -452,12 +490,22 @@ async def update_group(group_id: UUID, payload: UpdateGroupRequest, current_user
     from app.models.commission import CommissionGroup, CommissionGroupRule
     g = (await db.execute(select(CommissionGroup).where(CommissionGroup.id == group_id))).scalar_one_or_none()
     if not g: raise HTTPException(404, "Group not found")
-    if payload.name        is not None: g.name        = payload.name
-    if payload.description is not None: g.description = payload.description
-    if payload.is_active   is not None: g.is_active   = payload.is_active
+    if payload.name             is not None: g.name             = payload.name
+    if payload.description      is not None: g.description      = payload.description
+    if payload.is_active        is not None: g.is_active        = payload.is_active
+    if payload.is_salary_group  is not None: g.is_salary_group  = payload.is_salary_group
+    if payload.monthly_salary   is not None: g.monthly_salary   = payload.monthly_salary
+    if payload.petrol_amount    is not None: g.petrol_amount    = payload.petrol_amount
+    if payload.mobile_recharge  is not None: g.mobile_recharge  = payload.mobile_recharge
+    if payload.bonus_amount     is not None: g.bonus_amount     = payload.bonus_amount
+    if payload.hra_amount       is not None: g.hra_amount       = payload.hra_amount
+    if payload.other_allowances is not None: g.other_allowances = payload.other_allowances
+    if payload.salary_notes     is not None: g.salary_notes     = payload.salary_notes
     if payload.rules is not None:
         await db.execute(CommissionGroupRule.__table__.delete().where(CommissionGroupRule.group_id == group_id))
-        for r in payload.rules:
+        # Salary groups never get service rules
+        rules_to_save = [] if g.is_salary_group else payload.rules
+        for r in rules_to_save:
             db.add(CommissionGroupRule(
                 group_id=group_id, service_id=UUID(r.service_id),
                 domain_id=UUID(r.domain_id) if r.domain_id else None,
@@ -581,3 +629,516 @@ async def delete_part_rule(group_id: UUID, rule_id: UUID, current_user: dict = D
     if not rule: raise HTTPException(404, "Part rule not found")
     await db.delete(rule); await db.commit()
     return success_response(message="Part rule deleted")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SALARY SETTLEMENT ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SalarySettlePayload(BaseModel):
+    technician_id:   str
+    month:           int
+    year:            int
+    base_salary:     float
+    petrol_amount:   float = 0.0
+    mobile_recharge: float = 0.0
+    bonus_amount:    float = 0.0
+    hra_amount:      float = 0.0
+    other_allowances:float = 0.0
+    deductions:      float = 0.0
+    admin_notes:     Optional[str] = None
+
+class SalaryPayoutPayload(BaseModel):
+    payout_method:    str   # UPI | BANK
+    payout_reference: Optional[str] = None
+    payout_notes:     Optional[str] = None
+    include_wallet_balance: bool = False  # if True, sweep full wallet balance
+
+
+@router.get("/salary/technicians", summary="List salary-group technicians with monthly stats [Admin]")
+async def list_salary_technicians(
+    month: int = Query(default=None),
+    year:  int = Query(default=None),
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns all technicians assigned to salary groups with their monthly
+    attendance summary and booking count for the given month/year."""
+    from app.models.commission import CommissionGroup, CommissionGroupAssignment, SalarySettlement
+    from app.models.technician import Technician
+    from app.models.booking import Booking, BookingStatus
+    from app.models.wallet import Wallet
+    from datetime import date
+    import calendar
+
+    now = date.today()
+    m = month or now.month
+    y = year  or now.year
+
+    # Fetch all salary groups
+    salary_groups = (await db.execute(
+        select(CommissionGroup).where(
+            CommissionGroup.is_salary_group == True,
+            CommissionGroup.is_active == True,
+        )
+    )).scalars().all()
+    group_map = {str(g.id): g for g in salary_groups}
+
+    # Fetch all assignments for salary groups
+    assignments = (await db.execute(
+        select(CommissionGroupAssignment).where(
+            CommissionGroupAssignment.group_id.in_([g.id for g in salary_groups])
+        )
+    )).scalars().all()
+    if not assignments:
+        return success_response(data=[], meta={"month": m, "year": y})
+
+    tech_ids = [a.technician_id for a in assignments]
+    group_by_tech = {str(a.technician_id): str(a.group_id) for a in assignments}
+
+    # Fetch technicians
+    techs = (await db.execute(
+        select(Technician).where(Technician.id.in_(tech_ids))
+    )).scalars().all()
+
+    # Attendance summary per technician for the month (from attendance_records if exists)
+    # Use raw SQL via text for simplicity
+    from sqlalchemy import text
+    # Try to query attendance table — it may be named differently
+    att_stats: dict = {}
+    try:
+        att_rows = (await db.execute(text("""
+            SELECT technician_id,
+                   COUNT(*) AS total_days,
+                   SUM(CASE WHEN status='PRESENT' THEN 1 ELSE 0 END) AS present_days,
+                   SUM(CASE WHEN status='ABSENT'  THEN 1 ELSE 0 END) AS absent_days,
+                   SUM(CASE WHEN status='LEAVE'   THEN 1 ELSE 0 END) AS leave_days,
+                   COALESCE(SUM(hours_worked), 0) AS total_hours
+            FROM attendance_records
+            WHERE EXTRACT(MONTH FROM date) = :m
+              AND EXTRACT(YEAR  FROM date) = :y
+              AND technician_id = ANY(:ids)
+            GROUP BY technician_id
+        """), {"m": m, "y": y, "ids": [str(t) for t in tech_ids]})).fetchall()
+        for row in att_rows:
+            att_stats[str(row.technician_id)] = {
+                "total_days": row.total_days or 0,
+                "present_days": row.present_days or 0,
+                "absent_days": row.absent_days or 0,
+                "leave_days": row.leave_days or 0,
+                "total_hours": round(float(row.total_hours or 0), 1),
+            }
+    except Exception:
+        pass  # attendance table may not exist yet
+
+    # Booking count per technician for the month
+    from datetime import datetime, timezone
+    start_dt = datetime(y, m, 1, tzinfo=timezone.utc)
+    end_dt   = datetime(y, m, calendar.monthrange(y, m)[1], 23, 59, 59, tzinfo=timezone.utc)
+    bk_rows = (await db.execute(
+        select(Booking.technician_id, func.count(Booking.id).label("cnt"))
+        .where(
+            Booking.technician_id.in_(tech_ids),
+            Booking.created_at >= start_dt,
+            Booking.created_at <= end_dt,
+        )
+        .group_by(Booking.technician_id)
+    )).all()
+    booking_count = {str(r.technician_id): r.cnt for r in bk_rows}
+
+    # Existing salary settlements for this month
+    settlements = (await db.execute(
+        select(SalarySettlement).where(
+            SalarySettlement.technician_id.in_(tech_ids),
+            SalarySettlement.month == m,
+            SalarySettlement.year  == y,
+        )
+    )).scalars().all()
+    settle_map = {str(s.technician_id): s for s in settlements}
+
+    # Wallet balances
+    wallets = (await db.execute(
+        select(Wallet).where(Wallet.technician_id.in_(tech_ids))
+    )).scalars().all()
+    wallet_map = {str(w.technician_id): w for w in wallets}
+
+    result = []
+    for tech in techs:
+        tid = str(tech.id)
+        grp = group_map.get(group_by_tech.get(tid, ""))
+        att = att_stats.get(tid, {})
+        ss  = settle_map.get(tid)
+        wallet = wallet_map.get(tid)
+        result.append({
+            "technician_id":   tid,
+            "name":            tech.name,
+            "mobile":          tech.mobile,
+            "technician_code": tech.technician_code,
+            "profile_image":   tech.profile_image,
+            "payout_upi_id":   getattr(tech, "payout_upi_id", None),
+            "payout_bank_account": getattr(tech, "payout_bank_account", None),
+            "payout_bank_name":    getattr(tech, "payout_bank_name", None),
+            "payout_bank_ifsc":    getattr(tech, "payout_bank_ifsc", None),
+            "payout_account_holder": getattr(tech, "payout_account_holder", None),
+            "group": {
+                "id":              str(grp.id),
+                "name":            grp.name,
+                "monthly_salary":  grp.monthly_salary,
+                "petrol_amount":   grp.petrol_amount or 0,
+                "mobile_recharge": grp.mobile_recharge or 0,
+                "bonus_amount":    grp.bonus_amount or 0,
+                "hra_amount":      grp.hra_amount or 0,
+                "other_allowances":grp.other_allowances or 0,
+                "salary_notes":    grp.salary_notes,
+            } if grp else None,
+            "attendance":  att,
+            "total_bookings": booking_count.get(tid, 0),
+            "wallet_balance": round(float(wallet.balance or 0), 2) if wallet else 0.0,
+            "settlement": {
+                "id":             str(ss.id),
+                "status":         ss.status,
+                "total_salary":   ss.total_salary,
+                "base_salary":    ss.base_salary,
+                "petrol_amount":  ss.petrol_amount,
+                "mobile_recharge":ss.mobile_recharge,
+                "bonus_amount":   ss.bonus_amount,
+                "hra_amount":     ss.hra_amount,
+                "other_allowances":ss.other_allowances,
+                "deductions":     ss.deductions,
+                "payout_status":  ss.payout_status,
+                "payout_method":  ss.payout_method,
+                "payout_reference":ss.payout_reference,
+                "payout_amount":  ss.payout_amount,
+                "admin_notes":    ss.admin_notes,
+                "created_at":     iso(ss.created_at) if ss.created_at else None,
+            } if ss else None,
+        })
+
+    return success_response(data=result, meta={"month": m, "year": y})
+
+
+@router.get("/salary/technicians/{technician_id}/report", summary="Salary report for one technician [Admin]")
+async def salary_technician_report(
+    technician_id: UUID,
+    month: int = Query(...),
+    year:  int = Query(...),
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full report: technician profile + attendance details + bookings + salary settlement snapshot."""
+    from app.models.commission import CommissionGroup, CommissionGroupAssignment, SalarySettlement
+    from app.models.technician import Technician
+    from app.models.booking import Booking, BookingStatus
+    from app.models.wallet import Wallet, WalletTransaction
+    from sqlalchemy import text
+    import calendar
+    from datetime import datetime, timezone
+
+    tech = (await db.execute(select(Technician).where(Technician.id == technician_id))).scalar_one_or_none()
+    if not tech: raise HTTPException(404, "Technician not found")
+
+    # Group
+    assign = (await db.execute(
+        select(CommissionGroupAssignment).where(CommissionGroupAssignment.technician_id == technician_id)
+    )).scalars().first()
+    grp = None
+    if assign:
+        grp = (await db.execute(select(CommissionGroup).where(CommissionGroup.id == assign.group_id))).scalar_one_or_none()
+
+    # Attendance records for month
+    att_records = []
+    att_summary = {}
+    try:
+        rows = (await db.execute(text("""
+            SELECT date, check_in, check_out, hours_worked, status, notes
+            FROM attendance_records
+            WHERE technician_id = :tid
+              AND EXTRACT(MONTH FROM date) = :m
+              AND EXTRACT(YEAR  FROM date) = :y
+            ORDER BY date
+        """), {"tid": str(technician_id), "m": month, "y": year})).fetchall()
+        att_records = [{"date": str(r.date), "check_in": str(r.check_in) if r.check_in else None,
+                        "check_out": str(r.check_out) if r.check_out else None,
+                        "hours_worked": round(float(r.hours_worked or 0), 2),
+                        "status": r.status, "notes": r.notes} for r in rows]
+        present = sum(1 for r in att_records if r["status"] == "PRESENT")
+        absent  = sum(1 for r in att_records if r["status"] == "ABSENT")
+        leave   = sum(1 for r in att_records if r["status"] == "LEAVE")
+        att_summary = {
+            "total_days": len(att_records),
+            "present_days": present,
+            "absent_days": absent,
+            "leave_days": leave,
+            "total_hours": round(sum(r["hours_worked"] for r in att_records), 1),
+        }
+    except Exception:
+        pass
+
+    # Bookings for month
+    start_dt = datetime(year, month, 1, tzinfo=timezone.utc)
+    end_dt   = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59, tzinfo=timezone.utc)
+    bookings = (await db.execute(
+        select(Booking).where(
+            Booking.technician_id == technician_id,
+            Booking.created_at >= start_dt,
+            Booking.created_at <= end_dt,
+        ).order_by(Booking.created_at.desc())
+    )).scalars().all()
+
+    # Wallet
+    wallet = (await db.execute(select(Wallet).where(Wallet.technician_id == technician_id))).scalar_one_or_none()
+    wallet_txns = []
+    if wallet:
+        txn_rows = (await db.execute(
+            select(WalletTransaction)
+            .where(WalletTransaction.wallet_id == wallet.id)
+            .order_by(WalletTransaction.created_at.desc())
+            .limit(20)
+        )).scalars().all()
+        wallet_txns = [{"id": str(t.id), "type": t.transaction_type, "amount": t.amount,
+                        "description": t.description, "created_at": iso(t.created_at)} for t in txn_rows]
+
+    # Existing settlement
+    ss = (await db.execute(
+        select(SalarySettlement).where(
+            SalarySettlement.technician_id == technician_id,
+            SalarySettlement.month == month,
+            SalarySettlement.year  == year,
+        )
+    )).scalar_one_or_none()
+
+    return success_response(data={
+        "technician": {
+            "id": str(tech.id), "name": tech.name, "mobile": tech.mobile,
+            "email": getattr(tech, "email", None),
+            "profile_image": tech.profile_image,
+            "payout_upi_id": getattr(tech, "payout_upi_id", None),
+            "payout_bank_account": getattr(tech, "payout_bank_account", None),
+            "payout_bank_ifsc":    getattr(tech, "payout_bank_ifsc", None),
+            "payout_bank_name":    getattr(tech, "payout_bank_name", None),
+            "payout_account_holder": getattr(tech, "payout_account_holder", None),
+        },
+        "group": {
+            "id": str(grp.id), "name": grp.name,
+            "monthly_salary":  grp.monthly_salary,
+            "petrol_amount":   grp.petrol_amount or 0,
+            "mobile_recharge": grp.mobile_recharge or 0,
+            "bonus_amount":    grp.bonus_amount or 0,
+            "hra_amount":      grp.hra_amount or 0,
+            "other_allowances":grp.other_allowances or 0,
+            "salary_notes":    grp.salary_notes,
+        } if grp else None,
+        "period": {"month": month, "year": year},
+        "attendance_records": att_records,
+        "attendance_summary": att_summary,
+        "bookings": [{
+            "id": str(b.id), "booking_number": b.booking_number,
+            "status": b.status.value if b.status else b.status,
+            "created_at": iso(b.created_at),
+        } for b in bookings],
+        "wallet": {
+            "balance": round(float(wallet.balance or 0), 2),
+            "total_earned": round(float(wallet.total_earned or 0), 2),
+            "total_withdrawn": round(float(wallet.total_withdrawn or 0), 2),
+        } if wallet else None,
+        "wallet_transactions": wallet_txns,
+        "settlement": {
+            "id": str(ss.id), "status": ss.status,
+            "base_salary": ss.base_salary, "petrol_amount": ss.petrol_amount,
+            "mobile_recharge": ss.mobile_recharge, "bonus_amount": ss.bonus_amount,
+            "hra_amount": ss.hra_amount, "other_allowances": ss.other_allowances,
+            "deductions": ss.deductions, "total_salary": ss.total_salary,
+            "payout_status": ss.payout_status, "payout_method": ss.payout_method,
+            "payout_reference": ss.payout_reference, "payout_amount": ss.payout_amount,
+            "admin_notes": ss.admin_notes,
+            "created_at": iso(ss.created_at) if ss.created_at else None,
+        } if ss else None,
+    })
+
+
+@router.post("/salary/settle", summary="Generate salary settlement and credit wallet [Admin]")
+async def create_salary_settlement(
+    payload: SalarySettlePayload,
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.commission import CommissionGroup, CommissionGroupAssignment, SalarySettlement
+    from app.models.technician import Technician
+    from app.models.wallet import Wallet, WalletTransaction
+
+    tech_id = UUID(payload.technician_id)
+    tech = (await db.execute(select(Technician).where(Technician.id == tech_id))).scalar_one_or_none()
+    if not tech: raise HTTPException(404, "Technician not found")
+
+    # Validate salary group membership
+    assign = (await db.execute(
+        select(CommissionGroupAssignment).where(CommissionGroupAssignment.technician_id == tech_id)
+    )).scalars().first()
+    if not assign:
+        raise HTTPException(400, "Technician is not assigned to any commission group")
+    grp = (await db.execute(select(CommissionGroup).where(CommissionGroup.id == assign.group_id))).scalar_one_or_none()
+    if not grp or not grp.is_salary_group:
+        raise HTTPException(400, "Technician is not in a salary group")
+
+    # Prevent double settlement
+    existing = (await db.execute(
+        select(SalarySettlement).where(
+            SalarySettlement.technician_id == tech_id,
+            SalarySettlement.month == payload.month,
+            SalarySettlement.year  == payload.year,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(400, f"Salary already settled for {payload.month}/{payload.year}")
+
+    total = (
+        payload.base_salary + payload.petrol_amount + payload.mobile_recharge +
+        payload.bonus_amount + payload.hra_amount + payload.other_allowances -
+        payload.deductions
+    )
+    total = max(0.0, total)
+
+    ss = SalarySettlement(
+        technician_id=tech_id, group_id=assign.group_id,
+        month=payload.month, year=payload.year,
+        base_salary=payload.base_salary, petrol_amount=payload.petrol_amount,
+        mobile_recharge=payload.mobile_recharge, bonus_amount=payload.bonus_amount,
+        hra_amount=payload.hra_amount, other_allowances=payload.other_allowances,
+        deductions=payload.deductions, total_salary=total,
+        status="PAID", admin_notes=payload.admin_notes,
+        settled_by=UUID(current_user["user_id"]),
+    )
+    db.add(ss)
+    await db.flush()
+
+    # Credit wallet
+    w = (await db.execute(select(Wallet).where(Wallet.technician_id == tech_id))).scalar_one_or_none()
+    if not w:
+        w = Wallet(technician_id=tech_id, user_id=tech.user_id, balance=0.0, total_earned=0.0, total_withdrawn=0.0)
+        db.add(w); await db.flush()
+    before = w.balance or 0
+    w.balance = round(before + total, 2)
+    w.total_earned = round((w.total_earned or 0) + total, 2)
+    txn = WalletTransaction(
+        wallet_id=w.id, transaction_type="SALARY",
+        amount=total, balance_before=before, balance_after=w.balance,
+        reference_id=str(ss.id),
+        description=f"Monthly salary for {payload.month}/{payload.year} — {grp.name}. {payload.admin_notes or ''}".strip(),
+        status="SUCCESS",
+    )
+    db.add(txn); await db.flush()
+    ss.wallet_txn_id = txn.id
+    await db.commit()
+
+    # FCM push
+    try:
+        from app.utils.fcm import send_simple_push
+        if getattr(tech, "fcm_token", None):
+            await send_simple_push(
+                fcm_token=tech.fcm_token,
+                title="Salary Credited 💼",
+                body=f"Your salary of ₹{total:.0f} for {payload.month}/{payload.year} has been credited to your wallet.",
+                data={"type": "SALARY_CREDITED", "amount": str(total)},
+            )
+    except Exception:
+        pass
+
+    return success_response(data={"id": str(ss.id), "total_salary": total, "wallet_balance": w.balance}, message="Salary settled and credited to wallet")
+
+
+@router.post("/salary/settlements/{settlement_id}/payout", summary="Send salary from wallet to bank/UPI [Admin]")
+async def salary_payout(
+    settlement_id: UUID,
+    payload: SalaryPayoutPayload,
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """Debit the technician's wallet (salary + any other wallet balance if requested)
+    and mark the settlement as paid out to bank/UPI."""
+    from app.models.commission import SalarySettlement
+    from app.models.technician import Technician
+    from app.models.wallet import Wallet, WalletTransaction
+    from datetime import datetime, timezone
+
+    ss = (await db.execute(select(SalarySettlement).where(SalarySettlement.id == settlement_id))).scalar_one_or_none()
+    if not ss: raise HTTPException(404, "Settlement not found")
+    if ss.status != "PAID": raise HTTPException(400, "Salary has not been credited to wallet yet")
+    if ss.payout_status == "PAID": raise HTTPException(400, "Already paid out")
+
+    tech = (await db.execute(select(Technician).where(Technician.id == ss.technician_id))).scalar_one_or_none()
+    if not tech: raise HTTPException(404, "Technician not found")
+
+    w = (await db.execute(select(Wallet).where(Wallet.technician_id == ss.technician_id))).scalar_one_or_none()
+    if not w: raise HTTPException(404, "Wallet not found")
+
+    # Amount to send: full wallet balance (includes salary + market reimbursements etc.)
+    # or just the salary amount
+    send_amount = round(float(w.balance or 0), 2) if payload.include_wallet_balance else round(float(ss.total_salary), 2)
+    if send_amount <= 0:
+        raise HTTPException(400, "Nothing to pay out — wallet balance is zero")
+    if (w.balance or 0) < send_amount:
+        raise HTTPException(400, f"Insufficient wallet balance ₹{w.balance:.2f} for payout of ₹{send_amount:.2f}")
+
+    if payload.payout_method not in ("UPI", "BANK"):
+        raise HTTPException(400, "payout_method must be UPI or BANK")
+
+    before = w.balance or 0
+    w.balance = round(before - send_amount, 2)
+    w.total_withdrawn = round((w.total_withdrawn or 0) + send_amount, 2)
+
+    txn = WalletTransaction(
+        wallet_id=w.id, transaction_type="WITHDRAWAL",
+        amount=send_amount, balance_before=before, balance_after=w.balance,
+        reference_id=payload.payout_reference,
+        description=f"Salary payout via {payload.payout_method} for {ss.month}/{ss.year}. Ref: {payload.payout_reference or 'N/A'}. {payload.payout_notes or ''}".strip(),
+        status="SUCCESS",
+    )
+    db.add(txn)
+
+    ss.payout_status    = "PAID"
+    ss.payout_method    = payload.payout_method
+    ss.payout_reference = payload.payout_reference
+    ss.payout_amount    = send_amount
+    ss.payout_notes     = payload.payout_notes
+    ss.payout_at        = datetime.now(timezone.utc)
+
+    await db.commit()
+
+    # FCM
+    try:
+        from app.utils.fcm import send_simple_push
+        upi_or_bank = getattr(tech, "payout_upi_id", None) if payload.payout_method == "UPI" else getattr(tech, "payout_bank_account", None)
+        if getattr(tech, "fcm_token", None):
+            await send_simple_push(
+                fcm_token=tech.fcm_token,
+                title="Salary Transferred 🏦",
+                body=f"₹{send_amount:.0f} has been sent to your {payload.payout_method}{(' — ' + str(upi_or_bank)) if upi_or_bank else ''}.",
+                data={"type": "SALARY_PAYOUT", "amount": str(send_amount)},
+            )
+    except Exception:
+        pass
+
+    return success_response(data={"payout_amount": send_amount, "wallet_balance": w.balance}, message="Salary paid out successfully")
+
+
+@router.get("/salary/settlements", summary="List all salary settlements [Admin]")
+async def list_salary_settlements(
+    month: Optional[int] = Query(None),
+    year:  Optional[int] = Query(None),
+    technician_id: Optional[str] = Query(None),
+    current_user: dict = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.commission import SalarySettlement
+    q = select(SalarySettlement)
+    if month: q = q.where(SalarySettlement.month == month)
+    if year:  q = q.where(SalarySettlement.year  == year)
+    if technician_id: q = q.where(SalarySettlement.technician_id == UUID(technician_id))
+    rows = (await db.execute(q.order_by(SalarySettlement.created_at.desc()))).scalars().all()
+    return success_response(data=[{
+        "id": str(s.id), "technician_id": str(s.technician_id),
+        "month": s.month, "year": s.year, "status": s.status,
+        "total_salary": s.total_salary, "payout_status": s.payout_status,
+        "payout_method": s.payout_method, "payout_reference": s.payout_reference,
+        "payout_amount": s.payout_amount, "created_at": iso(s.created_at) if s.created_at else None,
+    } for s in rows])

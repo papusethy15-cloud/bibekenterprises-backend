@@ -713,6 +713,19 @@ async def captain_booking_commission(
         select(Commission).where(Commission.booking_id == booking_id, Commission.technician_id == tech.id)
     )).scalars().all()
 
+    # Determine if technician is in a salary group
+    from app.models.commission import CommissionGroup, CommissionGroupAssignment
+    _salary_group = False
+    _assign = (await db.execute(
+        select(CommissionGroupAssignment).where(CommissionGroupAssignment.technician_id == tech.id)
+    )).scalars().first()
+    if _assign:
+        _grp = (await db.execute(
+            select(CommissionGroup).where(CommissionGroup.id == _assign.group_id)
+        )).scalar_one_or_none()
+        if _grp:
+            _salary_group = bool(getattr(_grp, "is_salary_group", False))
+
     items = [{
         "id": str(c.id),
         "item_type": c.item_type,
@@ -722,11 +735,15 @@ async def captain_booking_commission(
         "status": c.status,
         "payout_date": iso(c.payout_date) if c.payout_date else None,
         "notes": c.notes,
+        "is_reimbursement": c.item_type == "PURCHASE_REIMBURSEMENT",
     } for c in rows]
 
     total_commission = int(round(sum(c.commission_amount or 0 for c in rows)))
     paid_commission  = int(round(sum(c.commission_amount or 0 for c in rows if c.status == "PAID")))
     is_settled       = bool(rows) and all(c.status == "PAID" for c in rows)
+
+    # For salary group: only reimbursement items are meaningful
+    has_market_reimbursement = any(c.item_type == "PURCHASE_REIMBURSEMENT" for c in rows)
 
     return success_response(data={
         "booking_id": str(booking_id),
@@ -735,6 +752,8 @@ async def captain_booking_commission(
         "paid_commission": paid_commission,
         "is_settled": is_settled,
         "has_commission": bool(rows),
+        "is_salary_group": _salary_group,
+        "has_market_reimbursement": has_market_reimbursement,
     })
 
 
@@ -968,18 +987,35 @@ async def captain_my_commissions(
 
     tech = await _get_technician_for_user(current_user["user_id"], db)
 
+    # Determine salary group status
+    from app.models.commission import CommissionGroup, CommissionGroupAssignment
+    _salary_group = False
+    _assign = (await db.execute(
+        select(CommissionGroupAssignment).where(CommissionGroupAssignment.technician_id == tech.id)
+    )).scalars().first()
+    if _assign:
+        _grp = (await db.execute(
+            select(CommissionGroup).where(CommissionGroup.id == _assign.group_id)
+        )).scalar_one_or_none()
+        if _grp:
+            _salary_group = bool(getattr(_grp, "is_salary_group", False))
+
     q = (
         select(Commission, Booking)
         .outerjoin(Booking, Booking.id == Commission.booking_id)
         .where(Commission.technician_id == tech.id)
     )
+    # Salary group technicians only see PURCHASE_REIMBURSEMENT records
+    if _salary_group:
+        q = q.where(Commission.item_type == "PURCHASE_REIMBURSEMENT")
     if status:
         q = q.where(Commission.status == status)
 
     # Totals across ALL records (ignore pagination)
-    all_rows = (await db.execute(
-        select(Commission).where(Commission.technician_id == tech.id)
-    )).scalars().all()
+    _base_query = select(Commission).where(Commission.technician_id == tech.id)
+    if _salary_group:
+        _base_query = _base_query.where(Commission.item_type == "PURCHASE_REIMBURSEMENT")
+    all_rows = (await db.execute(_base_query)).scalars().all()
     total_pending  = int(round(sum(r.commission_amount or 0 for r in all_rows if r.status == "PENDING")))
     total_approved = int(round(sum(r.commission_amount or 0 for r in all_rows if r.status == "APPROVED")))
     total_paid     = int(round(sum(r.commission_amount or 0 for r in all_rows if r.status == "PAID")))
@@ -1012,9 +1048,11 @@ async def captain_my_commissions(
             "payout_date":       iso(comm.payout_date) if comm.payout_date else None,
             "notes":             comm.notes,
             "created_at":        iso(comm.created_at) if comm.created_at else None,
+            "is_reimbursement":  comm.item_type == "PURCHASE_REIMBURSEMENT",
         })
 
     return success_response(data={
+        "is_salary_group": _salary_group,
         "summary": {
             "total_pending":   total_pending,
             "total_approved":  total_approved,

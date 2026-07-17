@@ -54,3 +54,7 @@ api_router.include_router(franchises.router,      prefix="/franchises",     tags
 api_router.include_router(domains.router,          prefix="/domains",         tags=["Domains"])
 api_router.include_router(chatbot.router,         prefix="/chatbot",         tags=["Chatbot"])
 api_router.include_router(captain.router,        prefix="/captain",        tags=["Captain App"])
+
+# Salary settlements
+from app.api.v1.routes import salary as salary_routes
+api_router.include_router(salary_routes.router, prefix="/salary-settlements", tags=["Salary"])
