@@ -761,6 +761,68 @@ async def slot_summary(
     return success_response(data={"date": date, "slot_counts": counts})
 
 
+# ── SLOT DETAIL (per-slot technician breakdown) ────────────────
+@router.get("/slot-detail", summary="Per-slot technician booking detail for a date [Admin/CCO]")
+async def slot_detail(
+    date: str = Query(..., description="YYYY-MM-DD"),
+    slot: str = Query(..., description="Slot value e.g. MORNING"),
+    current_user: dict = Depends(AdminOrCCO),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns all active bookings in the given slot+date with technician info.
+    Used by the reschedule modal to warn admin/CCO about overloaded slots
+    when no technician is assigned to the booking being rescheduled.
+    """
+    from sqlalchemy import cast as _cast, Date as _SADate
+    from datetime import datetime as _dt_sd
+
+    try:
+        target_date = _dt_sd.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    active_statuses = [
+        BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ASSIGNED,
+        BookingStatus.ACCEPTED, BookingStatus.EN_ROUTE, BookingStatus.ARRIVED,
+        BookingStatus.INSPECTING, BookingStatus.IN_PROGRESS, BookingStatus.WORK_STARTED,
+        BookingStatus.WORK_PAUSED, BookingStatus.QUOTATION_APPROVED,
+        BookingStatus.TECHNICIAN_ACCEPTED, BookingStatus.PENDING_VERIFICATION,
+        BookingStatus.RESCHEDULED, BookingStatus.INVOICE_GENERATED,
+        BookingStatus.PAYMENT_PENDING, BookingStatus.CANCELLATION_REQUESTED,
+    ]
+
+    rows = (await db.execute(
+        select(Booking, Technician)
+        .outerjoin(Technician, Technician.id == Booking.technician_id)
+        .where(
+            _cast(Booking.scheduled_date, _SADate) == target_date,
+            Booking.scheduled_slot == slot,
+            Booking.status.in_(active_statuses),
+        )
+        .order_by(Booking.created_at)
+    )).all()
+
+    items = []
+    for bk, tech in rows:
+        items.append({
+            "booking_id": str(bk.id),
+            "booking_number": bk.booking_number,
+            "status": bk.status.value,
+            "service_name": bk.service_name,
+            "technician_id": str(tech.id) if tech else None,
+            "technician_name": tech.name if tech else None,
+            "technician_phone": tech.phone if tech else None,
+        })
+
+    return success_response(data={
+        "date": date,
+        "slot": slot,
+        "count": len(items),
+        "bookings": items,
+    })
+
+
 # ── LIST BOOKINGS ──────────────────────────────────────────────
 @router.get("", summary="List bookings [Admin/CCO or own]")
 async def list_bookings(

@@ -173,6 +173,8 @@ def _payment_summary(transaction: PaymentTransaction, booking=None, customer_nam
         "created_at": iso(transaction.created_at),
         "due_collect_at": iso(transaction.due_collect_at) if getattr(transaction, "due_collect_at", None) else None,
         "last_reminder_at": iso(transaction.last_reminder_at) if getattr(transaction, "last_reminder_at", None) else None,
+        "collected_by_role": getattr(transaction, "collected_by_role", None),
+        "collected_by": str(transaction.collected_by) if getattr(transaction, "collected_by", None) else None,
     }
 
 
