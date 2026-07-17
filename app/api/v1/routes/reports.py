@@ -135,7 +135,7 @@ async def technician_report(
     from app.models.technician import Technician
     from app.models.booking import Booking
     from app.models.payment import PaymentTransaction, PaymentStatus
-    from app.models.attendance import AttendanceRecord
+    from app.models.attendance import Attendance as AttendanceRecord
     from uuid import UUID
 
     # Date range defaults
@@ -503,13 +503,13 @@ async def technician_detail_report(
     } for c in commission_rows]
 
     # ── Attendance for this technician in range ────────────────────────────
-    from app.models.attendance import AttendanceRecord
+    from app.models.attendance import Attendance as AttendanceModel
     attendance_rows = (await db.execute(
-        select(AttendanceRecord).where(
-            AttendanceRecord.technician_id == tid,
-            AttendanceRecord.date >= sd,
-            AttendanceRecord.date <= ed,
-        ).order_by(AttendanceRecord.date.desc())
+        select(AttendanceModel).where(
+            AttendanceModel.technician_id == tid,
+            AttendanceModel.date >= sd,
+            AttendanceModel.date <= ed,
+        ).order_by(AttendanceModel.date.desc())
     )).scalars().all()
 
     att_present     = sum(1 for a in attendance_rows if (a.status or "PRESENT") == "PRESENT")
