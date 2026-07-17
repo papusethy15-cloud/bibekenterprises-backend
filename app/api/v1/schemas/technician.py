@@ -61,6 +61,21 @@ class UpdateTechnicianRequest(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
     alternate_mobile: Optional[str] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _empty_email_to_none(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    @field_validator("alternate_mobile", "emergency_contact_mobile", mode="before")
+    @classmethod
+    def _norm_optional_mobile(cls, v):
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return None
+        from app.utils.phone import normalize_mobile
+        return normalize_mobile(v)
     city: Optional[str] = None
     area: Optional[str] = None
     experience_years: Optional[int] = None
