@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = '071_add_is_salary_group'
-down_revision = '070_add_is_active_to_quotation_part_items'
+down_revision = '070'
 branch_labels = None
 depends_on = None
 
