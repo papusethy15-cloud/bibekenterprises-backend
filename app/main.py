@@ -34,7 +34,7 @@ async def _auto_migrate():
             # calls sys.exit() on certain conditions → Click prints "Aborted!"
             # to stderr. We avoid calling it at all if the DB is already at head.
             # Uses subprocess psql (always available on VPS) for the version check.
-            CURRENT_HEAD = "069"
+            CURRENT_HEAD = "072_add_salary_settlements"
             try:
                 import subprocess as _sp
                 _pg_url = _s.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -662,6 +662,10 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_id       UUID;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_code     VARCHAR(50);
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS coupon_discount FLOAT DEFAULT 0.0;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS city_id         UUID;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS appliance_id    UUID;
+ALTER TYPE bookingsource ADD VALUE IF NOT EXISTS 'CALL_CENTER';
+ALTER TYPE bookingsource ADD VALUE IF NOT EXISTS 'WALK_IN';
+ALTER TYPE bookingsource ADD VALUE IF NOT EXISTS 'FRANCHISE';
 """
 
     try:

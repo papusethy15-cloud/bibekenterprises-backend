@@ -238,3 +238,114 @@ async def ws_customer(
     await manager.connect(ws, rooms)
     logger.info(f"[WS] Customer {user_id} connected user={user['user_id']}")
     await _ws_loop(ws, rooms, user)
+
+
+# ─── Real-time backend log stream ────────────────────────────────────────────
+import asyncio
+import os
+
+LOG_FILE = os.environ.get(
+    "BACKEND_LOG_FILE",
+    "/home/srikanta/.pm2/logs/bibek-backend-out.log"
+)
+ERR_FILE = os.environ.get(
+    "BACKEND_ERR_FILE",
+    "/home/srikanta/.pm2/logs/bibek-backend-error.log"
+)
+LOG_TAIL_LINES = 100          # lines to send on initial connect
+
+
+@router.websocket("/ws/admin/logs")
+async def ws_admin_logs(
+    ws: WebSocket,
+    token: str | None = Query(default=None),
+):
+    """
+    Streams live backend stdout + stderr logs to the admin dashboard.
+    On connect: sends last LOG_TAIL_LINES from each log file (prefixed with [OUT] / [ERR]).
+    Then tails both files in real-time and forwards new lines as they appear.
+    Requires ?token=<access_token> with ADMIN or SUPER_ADMIN role.
+    """
+    user = await _validate_ws_token(ws, token)
+    if not user:
+        return
+
+    if user.get("role") not in ("ADMIN", "SUPER_ADMIN"):
+        await ws.close(code=4003, reason="Admin only")
+        return
+
+    async def _send(line: str):
+        try:
+            await ws.send_text(line)
+        except Exception:
+            pass
+
+    def _tail_file(path: str, n: int) -> list[str]:
+        """Read last n lines from a file without loading the whole file."""
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                buf, block = b"", 4096
+                lines_found = 0
+                pos = size
+                while pos > 0 and lines_found < n + 1:
+                    read = min(block, pos)
+                    pos -= read
+                    f.seek(pos)
+                    chunk = f.read(read)
+                    buf = chunk + buf
+                    lines_found = buf.count(b"\n")
+                lines = buf.decode("utf-8", errors="replace").splitlines()
+                return lines[-n:] if len(lines) >= n else lines
+        except FileNotFoundError:
+            return [f"[LOG FILE NOT FOUND: {path}]"]
+        except Exception as e:
+            return [f"[LOG READ ERROR: {e}]"]
+
+    # Send last N lines from both files on connect
+    for line in _tail_file(LOG_FILE, LOG_TAIL_LINES):
+        await _send(f"[OUT] {line}")
+    for line in _tail_file(ERR_FILE, LOG_TAIL_LINES):
+        await _send(f"[ERR] {line}")
+    await _send("[LOG_STREAM_READY]")
+
+    # Tail both files in real-time
+    async def _file_tailer(path: str, prefix: str):
+        try:
+            with open(path, "r", errors="replace") as f:
+                f.seek(0, 2)  # seek to end
+                while True:
+                    line = f.readline()
+                    if line:
+                        await _send(f"{prefix} {line.rstrip()}")
+                    else:
+                        await asyncio.sleep(0.3)
+        except FileNotFoundError:
+            await _send(f"{prefix} [FILE NOT FOUND: {path}]")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            await _send(f"{prefix} [TAILER ERROR: {e}]")
+
+    out_task = asyncio.create_task(_file_tailer(LOG_FILE, "[OUT]"))
+    err_task = asyncio.create_task(_file_tailer(ERR_FILE, "[ERR]"))
+
+    try:
+        # Keep alive: wait for disconnect or PING from client
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+                if msg == "PING":
+                    await _send("PONG")
+            except asyncio.TimeoutError:
+                await _send("PONG")  # heartbeat
+            except Exception:
+                break
+    finally:
+        out_task.cancel()
+        err_task.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
