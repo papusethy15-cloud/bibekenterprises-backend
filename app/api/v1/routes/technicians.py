@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from uuid import UUID
@@ -386,7 +386,7 @@ async def get_availability(
 @router.put("/{tech_id}/availability", summary="Set full availability schedule [Admin]")
 async def set_availability(
     tech_id: UUID,
-    slots: list,
+    slots: list = Body(...),
     current_user: dict = Depends(AdminOnly),
     db: AsyncSession = Depends(get_db)
 ):
