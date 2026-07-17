@@ -626,18 +626,18 @@ async def create_booking(
     elif payload.city and payload.domain_id:
         # Try to find a city linked to this domain that matches the city name
         dc_row = (await db.execute(
-            select(DomainCity, CityModel)
-            .join(CityModel, CityModel.id == DomainCity.city_id)
+            select(CityModel)
+            .join(DomainCity, DomainCity.city_id == CityModel.id)
             .where(
                 DomainCity.domain_id == UUID(payload.domain_id),
                 DomainCity.is_active == True,
                 CityModel.is_active == True,
                 CityModel.name.ilike(payload.city),
             )
-        )).first()
+        )).scalar_one_or_none()
         if dc_row:
-            resolved_city_id = dc_row.CityModel.id
-            resolved_city_name = dc_row.CityModel.name
+            resolved_city_id = dc_row.id
+            resolved_city_name = dc_row.name
     elif payload.city:
         # Fallback: match city by name globally
         city_row = (await db.execute(
