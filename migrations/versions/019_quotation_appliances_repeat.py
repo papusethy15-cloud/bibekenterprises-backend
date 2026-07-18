@@ -41,14 +41,11 @@ def upgrade():
     op.create_index('ix_quotation_appliances_quotation_id', 'quotation_appliances', ['quotation_id'])
 
     # ── quotation_service_items: add appliance_label + is_repeat_complaint ──
-    op.add_column('quotation_service_items',
-        sa.Column('appliance_label', sa.String(300), nullable=True))
-    op.add_column('quotation_service_items',
-        sa.Column('is_repeat_complaint', sa.Boolean(), nullable=False, server_default='false'))
+    op.execute(sa.text("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS appliance_label VARCHAR(300)"))
+    op.execute(sa.text("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS is_repeat_complaint BOOLEAN NOT NULL DEFAULT false"))
 
     # ── quotation_part_items: add is_repeat_complaint ───────────────────────
-    op.add_column('quotation_part_items',
-        sa.Column('is_repeat_complaint', sa.Boolean(), nullable=False, server_default='false'))
+    op.execute(sa.text("ALTER TABLE quotation_part_items ADD COLUMN IF NOT EXISTS is_repeat_complaint BOOLEAN NOT NULL DEFAULT false"))
 
 
 def downgrade():

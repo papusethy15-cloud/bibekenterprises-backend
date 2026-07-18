@@ -22,9 +22,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TYPE paymentmethod ADD VALUE IF NOT EXISTS 'PAY_LATER'")
-    op.add_column("payment_transactions", sa.Column("due_collect_at", sa.DateTime(timezone=True), nullable=True))
-    op.add_column("payment_transactions", sa.Column("last_reminder_at", sa.DateTime(timezone=True), nullable=True))
+    op.execute(sa.text("ALTER TYPE paymentmethod ADD VALUE IF NOT EXISTS 'PAY_LATER'"))
+    op.execute(sa.text("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS due_collect_at TIMESTAMPTZ"))
+    op.execute(sa.text("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMPTZ"))
 
 
 def downgrade() -> None:

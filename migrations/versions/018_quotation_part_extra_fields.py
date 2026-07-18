@@ -13,10 +13,10 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
-    # Add new columns with defaults so existing rows are unaffected
-    op.add_column('quotation_part_items', sa.Column('purchase_price', sa.Float(), nullable=True, server_default='0'))
-    op.add_column('quotation_part_items', sa.Column('inventory_item_id', sa.dialects.postgresql.UUID(as_uuid=True), nullable=True))
-    op.add_column('quotation_part_items', sa.Column('is_pending_verify', sa.Integer(), nullable=True, server_default='0'))
+    # Add new columns — all guarded with IF NOT EXISTS for idempotency on fresh DBs
+    op.execute(sa.text("ALTER TABLE quotation_part_items ADD COLUMN IF NOT EXISTS purchase_price FLOAT DEFAULT 0"))
+    op.execute(sa.text("ALTER TABLE quotation_part_items ADD COLUMN IF NOT EXISTS inventory_item_id UUID"))
+    op.execute(sa.text("ALTER TABLE quotation_part_items ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER DEFAULT 0"))
 
 def downgrade():
     op.drop_column('quotation_part_items', 'is_pending_verify')

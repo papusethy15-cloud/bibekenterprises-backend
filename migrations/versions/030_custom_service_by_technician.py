@@ -25,16 +25,16 @@ depends_on = None
 
 def upgrade():
     # 1. Add is_pending_verify and suggested_by_tech to services
-    op.add_column('services', sa.Column('is_pending_verify', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('services', sa.Column('suggested_by_tech', UUID(as_uuid=True), nullable=True))
+    op.execute(sa.text("ALTER TABLE services ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0"))
+    op.execute(sa.text("ALTER TABLE services ADD COLUMN IF NOT EXISTS suggested_by_tech UUID"))
 
     # 2. Make service_id nullable in quotation_service_items (for custom/suggested services)
-    op.alter_column('quotation_service_items', 'service_id', nullable=True)
+    op.execute(sa.text("ALTER TABLE quotation_service_items ALTER COLUMN service_id DROP NOT NULL"))
 
     # 3. Add custom_service tracking columns to quotation_service_items
-    op.add_column('quotation_service_items', sa.Column('is_pending_verify', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('quotation_service_items', sa.Column('custom_service_name', sa.Text(), nullable=True))
-    op.add_column('quotation_service_items', sa.Column('tech_commission_override', sa.Float(), nullable=True))
+    op.execute(sa.text("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0"))
+    op.execute(sa.text("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS custom_service_name TEXT"))
+    op.execute(sa.text("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS tech_commission_override FLOAT"))
 
 
 def downgrade():

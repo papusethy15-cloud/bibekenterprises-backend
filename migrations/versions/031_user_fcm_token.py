@@ -13,7 +13,7 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
-    op.add_column('users', sa.Column('fcm_token', sa.String(500), nullable=True))
+    op.execute(sa.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)"))
 
 def downgrade():
     op.drop_column('users', 'fcm_token')

@@ -13,11 +13,11 @@ depends_on = None
 
 def upgrade():
     # tax_mode: NONE | B2C | B2B  (default B2C = tax enabled, customer type consumer)
-    op.add_column('quotations', sa.Column('tax_mode', sa.String(10), nullable=False, server_default='B2C'))
+    op.execute(sa.text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS tax_mode VARCHAR(10) NOT NULL DEFAULT 'B2C'"))
     # B2B customer GST snapshot
-    op.add_column('quotations', sa.Column('customer_gst_number', sa.String(20), nullable=True))
-    op.add_column('quotations', sa.Column('customer_gst_name',   sa.String(200), nullable=True))
-    op.add_column('quotations', sa.Column('customer_gst_address',sa.Text(), nullable=True))
+    op.execute(sa.text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_gst_number VARCHAR(20)"))
+    op.execute(sa.text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_gst_name VARCHAR(200)"))
+    op.execute(sa.text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_gst_address TEXT"))
 
 def downgrade():
     op.drop_column('quotations', 'customer_gst_address')
