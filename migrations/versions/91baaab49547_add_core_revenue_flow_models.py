@@ -8,7 +8,7 @@ REWRITTEN: Original used op.create_table() which raises DuplicateTableError when
 the VPS DB already has these tables (created before Alembic tracking was in place).
 All CREATE TABLE statements now use IF NOT EXISTS so this migration is fully
 idempotent — safe no-op on any DB that already has the schema.
-Enum types also use CREATE TYPE IF NOT EXISTS.
+Enum types use DO $$ BEGIN ... EXCEPTION WHEN duplicate_object ... END $$; for idempotency.
 """
 from typing import Sequence, Union
 from alembic import op
@@ -22,19 +22,30 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create enum types (IF NOT EXISTS requires PG 9.5+ — we're on PG 14+)
-    op.execute("CREATE TYPE IF NOT EXISTS userrole AS ENUM ('SUPER_ADMIN','ADMIN','CCO','TECHNICIAN','CUSTOMER','ACCOUNTANT','INVENTORY_MANAGER')")
-    op.execute("CREATE TYPE IF NOT EXISTS technicianstatus AS ENUM ('ACTIVE','INACTIVE','ON_LEAVE','SUSPENDED')")
-    op.execute("CREATE TYPE IF NOT EXISTS bookingstatus AS ENUM ('PENDING','CONFIRMED','ASSIGNED','ACCEPTED','EN_ROUTE','ARRIVED','INSPECTING','IN_PROGRESS','COMPLETED','CANCELLED','RESCHEDULED','NO_SHOW')")
-    op.execute("CREATE TYPE IF NOT EXISTS bookingsource AS ENUM ('WEBSITE','MOBILE_APP','CALL_CENTER','WALK_IN','FRANCHISE')")
-    op.execute("CREATE TYPE IF NOT EXISTS assignmenttype AS ENUM ('AUTO','MANUAL')")
-    op.execute("CREATE TYPE IF NOT EXISTS assignmentstatus AS ENUM ('ASSIGNED','ACCEPTED','REJECTED','TIMEOUT','REASSIGNED')")
-    op.execute("CREATE TYPE IF NOT EXISTS quotationstatus AS ENUM ('DRAFT','SUBMITTED','APPROVED','REJECTED','REVISED','EXPIRED','CONVERTED_TO_INVOICE')")
-    op.execute("CREATE TYPE IF NOT EXISTS invoicetype AS ENUM ('GST_B2C','GST_B2B','NON_GST')")
-    op.execute("CREATE TYPE IF NOT EXISTS invoicestatus AS ENUM ('DRAFT','GENERATED','PAID','PARTIALLY_PAID','CANCELLED','REFUNDED')")
-    op.execute("CREATE TYPE IF NOT EXISTS paymentmethod AS ENUM ('RAZORPAY','UPI','CASH','BANK_TRANSFER','WALLET')")
-    op.execute("CREATE TYPE IF NOT EXISTS paymentstatus AS ENUM ('PENDING','SUCCESS','FAILED','REFUNDED','PARTIALLY_REFUNDED')")
-    op.execute("CREATE TYPE IF NOT EXISTS partsource AS ENUM ('OFFICE_STOCK','MARKET_PURCHASE')")
+    # Create enum types — idempotent using DO block (correct PostgreSQL syntax).
+    # CREATE TYPE IF NOT EXISTS does NOT exist in PostgreSQL — use the DO block pattern instead.
+    enums = [
+        ("userrole",        "SUPER_ADMIN,ADMIN,CCO,TECHNICIAN,CUSTOMER,ACCOUNTANT,INVENTORY_MANAGER"),
+        ("technicianstatus","ACTIVE,INACTIVE,ON_LEAVE,SUSPENDED"),
+        ("bookingstatus",   "PENDING,CONFIRMED,ASSIGNED,ACCEPTED,EN_ROUTE,ARRIVED,INSPECTING,IN_PROGRESS,COMPLETED,CANCELLED,RESCHEDULED,NO_SHOW"),
+        ("bookingsource",   "WEBSITE,MOBILE_APP,CALL_CENTER,WALK_IN,FRANCHISE"),
+        ("assignmenttype",  "AUTO,MANUAL"),
+        ("assignmentstatus","ASSIGNED,ACCEPTED,REJECTED,TIMEOUT,REASSIGNED"),
+        ("quotationstatus", "DRAFT,SUBMITTED,APPROVED,REJECTED,REVISED,EXPIRED,CONVERTED_TO_INVOICE"),
+        ("invoicetype",     "GST_B2C,GST_B2B,NON_GST"),
+        ("invoicestatus",   "DRAFT,GENERATED,PAID,PARTIALLY_PAID,CANCELLED,REFUNDED"),
+        ("paymentmethod",   "RAZORPAY,UPI,CASH,BANK_TRANSFER,WALLET"),
+        ("paymentstatus",   "PENDING,SUCCESS,FAILED,REFUNDED,PARTIALLY_REFUNDED"),
+        ("partsource",      "OFFICE_STOCK,MARKET_PURCHASE"),
+    ]
+    for type_name, values_csv in enums:
+        values_sql = ",".join(f"'{v}'" for v in values_csv.split(","))
+        op.execute(f"""
+            DO $$ BEGIN
+                CREATE TYPE {type_name} AS ENUM ({values_sql});
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$;
+        """)
 
     op.execute("""
         CREATE TABLE IF NOT EXISTS assignment_rules (
