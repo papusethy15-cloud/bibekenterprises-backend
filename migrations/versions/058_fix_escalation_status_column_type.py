@@ -1,16 +1,23 @@
 """058_fix_escalation_status_column_type
 
-The escalations.status column was created as VARCHAR(20) in earlier
-migrations, but the SQLAlchemy model declares it as SAEnum(EscalationStatus)
-which PostgreSQL maps to the native `escalationstatus` enum type.
+Migration 001 created the escalations table with an old schema that is missing
+several columns the current SQLAlchemy model expects, and has extra columns
+the model no longer uses.
 
-This causes:
-  asyncpg.exceptions.UndefinedFunctionError:
-    operator does not exist: character varying = escalationstatus
+Current model (escalation.py) expects:
+  created_by, booking_id, subject, description, priority, status (enum),
+  assigned_to, resolved_by, resolved_at, resolution_notes,
+  escalation_level, escalation_notes
 
-Fix: ALTER COLUMN status to use the existing `escalationstatus` PG enum type.
-The enum type already exists (created by SQLAlchemy metadata or a prior
-migration) — we only need to migrate the column's type.
+Migration 001 created:
+  id, booking_id, customer_id, raised_by, type, description, priority,
+  status (VARCHAR), resolved_by, resolution, is_active, created_at, updated_at
+
+This migration:
+  1. Ensures escalationstatus enum type exists
+  2. Adds ALL missing columns (IF NOT EXISTS — safe no-op if already present)
+  3. Converts status column from VARCHAR to escalationstatus enum
+  4. Sets sensible column defaults
 
 Revision ID: 058
 Revises: 057
@@ -25,7 +32,7 @@ depends_on = None
 
 
 def upgrade():
-    # Ensure the enum type exists (idempotent)
+    # ── 1. Ensure escalationstatus enum type exists ──────────────────────
     op.execute(text("""
         DO $$
         BEGIN
@@ -37,7 +44,19 @@ def upgrade():
         END$$;
     """))
 
-    # Alter status column from varchar to the native enum type (idempotent)
+    # ── 2. Add all missing columns (IF NOT EXISTS — fully idempotent) ────
+    op.execute(text("""
+        ALTER TABLE escalations
+            ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id),
+            ADD COLUMN IF NOT EXISTS subject VARCHAR(300),
+            ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES users(id),
+            ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS resolution_notes TEXT,
+            ADD COLUMN IF NOT EXISTS escalation_level INTEGER DEFAULT 1,
+            ADD COLUMN IF NOT EXISTS escalation_notes TEXT;
+    """))
+
+    # ── 3. Convert status column from VARCHAR to escalationstatus enum ───
     op.execute(text("""
         DO $$
         BEGIN
@@ -45,12 +64,19 @@ def upgrade():
                 WHERE table_name='escalations' AND column_name='status') = 'character varying' THEN
                 ALTER TABLE escalations
                     ALTER COLUMN status TYPE escalationstatus
-                    USING status::escalationstatus;
+                    USING COALESCE(
+                        CASE
+                            WHEN status IN ('OPEN','IN_PROGRESS','ESCALATED','RESOLVED','CLOSED')
+                            THEN status::escalationstatus
+                            ELSE 'OPEN'::escalationstatus
+                        END,
+                        'OPEN'::escalationstatus
+                    );
             END IF;
         END$$;
     """))
 
-    # Set sensible defaults
+    # ── 4. Set column defaults ────────────────────────────────────────────
     op.execute(text("""
         ALTER TABLE escalations
             ALTER COLUMN status SET DEFAULT 'OPEN'::escalationstatus;
