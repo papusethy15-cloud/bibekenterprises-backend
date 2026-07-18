@@ -45,8 +45,27 @@ def _fk_target(bind, table, column):
     return row[0] if row else None
 
 
+def _col_exists(bind, table, column):
+    """Check if a column exists in a table."""
+    row = bind.execute(sa.text(
+        "SELECT EXISTS ("
+        "  SELECT 1 FROM information_schema.columns "
+        "  WHERE table_schema='public' AND table_name=:tbl AND column_name=:col"
+        ")"
+    ), {"tbl": table, "col": column}).scalar()
+    return row
+
+
 def upgrade():
     bind = op.get_bind()
+
+    # ── Guard: brand_id column must exist before we can add a FK on it.
+    #    On a fresh paleisolutions DB, brand_id is added by migration 009.
+    #    If the column is absent here, skip gracefully — 010_merge_and_fix_inventory_tables
+    #    will handle the FK once 009 has created the column.
+    if not _col_exists(bind, 'inventory_items', 'brand_id'):
+        print("  brand_id column not present in inventory_items — skipping FK (will be handled in 010).")
+        return
 
     current_target = _fk_target(bind, 'inventory_items', 'brand_id')
     print(f"  Current FK target for inventory_items.brand_id: {current_target}")
@@ -56,7 +75,6 @@ def upgrade():
         return
 
     # ── Drop whatever FK currently exists ──────────────────────
-    # The constraint name may vary; find it dynamically
     rows = bind.execute(sa.text("""
         SELECT rc.constraint_name
         FROM information_schema.key_column_usage kcu
