@@ -434,9 +434,16 @@ async def profile_complete(current_user=Depends(AnyStaff), db: AsyncSession = De
 @router.get("/maps/public", summary="Get Google Maps API key (public — no auth)")
 async def get_maps_public(db: AsyncSession = Depends(get_db)):
     """Public endpoint — used by website tracking page to load Google Maps."""
-    data = await _get_group(db, "maps")
-    # Only expose the API key, nothing else
-    return success_response(data={"google_maps_api_key": data.get("google_maps_api_key", "")})
+    # Fetch the raw (unmasked) value directly — _get_group masks secrets as "***"
+    # which would cause InvalidKeyMapError from the Google Maps SDK.
+    row = (await db.execute(
+        select(SystemSetting).where(
+            SystemSetting.group == "maps",
+            SystemSetting.key == "google_maps_api_key",
+        )
+    )).scalar_one_or_none()
+    api_key = row.value if row and row.value else ""
+    return success_response(data={"google_maps_api_key": api_key})
 
 
 # ── Payment public ────────────────────────────────────────────────────────────

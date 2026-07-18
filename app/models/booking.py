@@ -98,6 +98,12 @@ class Booking(BaseModel):
     technician_to_customer_rating = Column(Float, nullable=True)
     technician_to_customer_notes  = Column(Text, nullable=True)
 
+    # Customer rates the technician / job after completion
+    customer_rating  = Column(Float,   nullable=True)   # 1–5
+    customer_review  = Column(Text,    nullable=True)   # written feedback
+    customer_name    = Column(String(120), nullable=True)  # snapshot of name at review time
+    customer_city    = Column(String(80),  nullable=True)  # snapshot of city
+
 class BookingStatusLog(BaseModel):
     __tablename__ = "booking_status_logs"
     booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id"), nullable=False)

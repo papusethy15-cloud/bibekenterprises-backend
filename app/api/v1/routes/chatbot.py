@@ -30,14 +30,15 @@ from app.utils.response import success_response, iso
 
 router = APIRouter()
 
-DOMAIN_SLUG = "bibekenterprises"
+# Default fallback slug — used only when the request doesn't include domain_slug
+_DEFAULT_DOMAIN_SLUG = "palei-solutions"
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class ChatMessageRequest(PydanticModel):
     message: str
     session_id: Optional[str] = None
-    domain_slug: Optional[str] = DOMAIN_SLUG
+    domain_slug: Optional[str] = None  # each site sends its own slug; fallback applied in handler
 
 class CallbackCreateRequest(PydanticModel):
     mobile: str
@@ -98,7 +99,8 @@ async def chat_message(payload: ChatMessageRequest, db: AsyncSession = Depends(g
     intent = detect_intent(payload.message)
 
     # ── Load domain + domain_profile for real contact details ──────────────────
-    domain = (await db.execute(select(Domain).where(Domain.slug == DOMAIN_SLUG))).scalar_one_or_none()
+    _slug = payload.domain_slug or _DEFAULT_DOMAIN_SLUG
+    domain = (await db.execute(select(Domain).where(Domain.slug == _slug))).scalar_one_or_none()
     profile = None
     if domain:
         profile = (await db.execute(

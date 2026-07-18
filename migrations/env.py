@@ -27,47 +27,46 @@ def run_migrations_offline():
         context.run_migrations()
 
 
-async def _stamp_baseline_async():
+async def _ensure_baseline_async():
     """
-    Runs BEFORE Alembic's run_sync bridge in its own committed transaction.
-    Resets alembic_version to STAMP_AT so Alembic will run FINAL_MIGRATION.
-    If FINAL_MIGRATION is already applied, this is a permanent no-op.
+    One-time baseline stamp for databases that were created before Alembic
+    was introduced. Checks if the DB has data (users table exists) but no
+    alembic_version row, and stamps it at the last known-good revision so
+    Alembic doesn't try to re-run every migration from scratch.
+
+    Safe to call on every upgrade — it's a permanent no-op once the
+    alembic_version table has any row.
     """
-    FINAL_MIGRATION = "072_add_salary_settlements"
-    STAMP_AT        = "070"
+    # The revision BEFORE the first migration that was NOT yet applied
+    # to the legacy VPS DB when Alembic was first introduced.
+    BASELINE_STAMP = "070"
 
     engine = create_async_engine(_DB_URL, poolclass=pool.NullPool)
     try:
         async with engine.begin() as conn:
-            has_table = (await conn.execute(text(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-                "WHERE table_name = 'alembic_version')"
-            ))).scalar()
-
             has_users = (await conn.execute(text(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
                 "WHERE table_name = 'users')"
             ))).scalar()
 
             if not has_users:
-                return  # fresh empty DB — let Alembic run from scratch
+                return  # fresh empty DB — Alembic runs all migrations normally
 
-            current = set()
-            if has_table:
-                rows = (await conn.execute(
-                    text("SELECT version_num FROM alembic_version")
-                )).fetchall()
-                current = {r[0] for r in rows}
+            has_alembic = (await conn.execute(text(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'alembic_version')"
+            ))).scalar()
 
-            if FINAL_MIGRATION in current:
-                return  # already up to date — permanent no-op
+            if has_alembic:
+                row_count = (await conn.execute(
+                    text("SELECT COUNT(*) FROM alembic_version")
+                )).scalar()
+                if row_count and row_count > 0:
+                    return  # already has a version stamp — nothing to do
 
-            print(
-                f"[INFO] env.py: {FINAL_MIGRATION} not yet applied "
-                f"(current={current}) — resetting to {STAMP_AT}"
-            )
-
-            if not has_table:
+            # DB has data but no version row — stamp the baseline
+            print(f"[INFO] env.py: legacy DB detected — stamping baseline {BASELINE_STAMP}")
+            if not has_alembic:
                 await conn.execute(text(
                     "CREATE TABLE alembic_version "
                     "(version_num VARCHAR(32) NOT NULL, "
@@ -77,67 +76,24 @@ async def _stamp_baseline_async():
                 await conn.execute(text("DELETE FROM alembic_version"))
 
             await conn.execute(
-                text(f"INSERT INTO alembic_version (version_num) VALUES ('{STAMP_AT}')")
+                text(f"INSERT INTO alembic_version (version_num) VALUES ('{BASELINE_STAMP}')")
             )
-            # engine.begin() auto-commits on __aexit__
-
-        print(
-            f"[INFO] env.py: alembic_version committed to {STAMP_AT} "
-            f"— upgrade will now run {FINAL_MIGRATION}"
-        )
-    finally:
-        await engine.dispose()
-
-
-async def _force_stamp_final_async(final: str):
-    """
-    Runs AFTER Alembic's run_sync bridge in its own committed transaction.
-    Forces alembic_version to FINAL_MIGRATION if Alembic's own stamp didn't persist.
-    This guards against the asyncpg run_sync transaction not committing the version update.
-    """
-    engine = create_async_engine(_DB_URL, poolclass=pool.NullPool)
-    try:
-        async with engine.begin() as conn:
-            rows = (await conn.execute(
-                text("SELECT version_num FROM alembic_version")
-            )).fetchall()
-            current = {r[0] for r in rows}
-
-            if final in current:
-                return  # already stamped correctly
-
-            print(f"[INFO] env.py: post-migration stamp fix — forcing {final} (was {current})")
-            await conn.execute(text("DELETE FROM alembic_version"))
-            await conn.execute(
-                text(f"INSERT INTO alembic_version (version_num) VALUES ('{final}')")
-            )
-        print(f"[INFO] env.py: alembic_version force-stamped to {final}")
+            print(f"[INFO] env.py: baseline stamp {BASELINE_STAMP} committed")
     finally:
         await engine.dispose()
 
 
 async def run_async_migrations():
-    FINAL_MIGRATION = "072_add_salary_settlements"
+    # Step 1: one-time baseline stamp (no-op if alembic_version already has a row)
+    await _ensure_baseline_async()
 
-    # Step 1: pre-stamp alembic_version in its own committed transaction
-    await _stamp_baseline_async()
-
-    # Step 2: run Alembic upgrade — picks up from STAMP_AT, runs FINAL_MIGRATION.
-    # Wrapped in try/except so that even if Alembic aborts (e.g. transactional DDL
-    # issue), Step 3 still runs and stamps the version, preventing the infinite loop.
+    # Step 2: run Alembic migrations normally — errors propagate so you see them
     engine = create_async_engine(_DB_URL, poolclass=pool.NullPool)
     try:
         async with engine.connect() as connection:
             await connection.run_sync(do_run_migrations)
-    except Exception as _exc:
-        print(f"[WARN] env.py: migration run_sync raised {_exc!r} — continuing to force-stamp")
     finally:
         await engine.dispose()
-
-    # Step 3: guarantee alembic_version is stamped even if run_sync aborted.
-    # This is the critical loop-breaker: whether DDL succeeded or was a no-op
-    # (IF NOT EXISTS), we stamp 056 so we never re-run this migration.
-    await _force_stamp_final_async(FINAL_MIGRATION)
 
 
 def do_run_migrations(connection):

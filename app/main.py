@@ -807,6 +807,27 @@ async def _integrity_error_handler(request: Request, exc: _SAIntegrityError) -> 
         headers=_cors_headers(request),
     )
 
+from fastapi import HTTPException as _HTTPException
+from fastapi.exception_handlers import http_exception_handler as _default_http_handler
+from fastapi.exception_handlers import request_validation_exception_handler as _default_validation_handler
+from fastapi.exceptions import RequestValidationError as _RequestValidationError
+
+@app.exception_handler(_HTTPException)
+async def _http_exception_handler_cors(request: Request, exc: _HTTPException) -> JSONResponse:
+    """Override FastAPI's default HTTPException handler to always inject CORS headers."""
+    response = await _default_http_handler(request, exc)
+    for k, v in _cors_headers(request).items():
+        response.headers[k] = v
+    return response
+
+@app.exception_handler(_RequestValidationError)
+async def _validation_exception_handler_cors(request: Request, exc: _RequestValidationError) -> JSONResponse:
+    """Override FastAPI's default validation error handler to always inject CORS headers."""
+    response = await _default_validation_handler(request, exc)
+    for k, v in _cors_headers(request).items():
+        response.headers[k] = v
+    return response
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     import logging, traceback

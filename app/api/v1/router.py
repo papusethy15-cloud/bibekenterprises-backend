@@ -62,3 +62,7 @@ api_router.include_router(salary_routes.router, prefix="/salary-settlements", ta
 # CCO Attendance & Salary
 from app.api.v1.routes import cco_attendance as cco_att_routes
 api_router.include_router(cco_att_routes.router, prefix="/cco-attendance", tags=["CCO Attendance"])
+
+# Public reviews
+from app.api.v1.routes import reviews as reviews_routes
+api_router.include_router(reviews_routes.router, prefix="/reviews", tags=["Reviews"])
