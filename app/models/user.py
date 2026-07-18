@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Enum as SAEnum
+from sqlalchemy import Column, String, Boolean, Float, Text, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 import enum, uuid
 from app.models.base import BaseModel
