@@ -29,45 +29,23 @@ depends_on = None
 
 def upgrade():
     # ── payment_transactions: due_collect_at ─────────────────────────────
-    op.execute(
+    op.execute(text(
         "ALTER TABLE payment_transactions "
         "ADD COLUMN IF NOT EXISTS due_collect_at TIMESTAMP WITH TIME ZONE"
-    )
+    ))
 
     # ── payment_transactions: last_reminder_at ───────────────────────────
-    op.execute(
+    op.execute(text(
         "ALTER TABLE payment_transactions "
         "ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMP WITH TIME ZONE"
-    )
+    ))
 
-    # ── paymentmethod enum: PAY_LATER value ──────────────────────────────
+    # ── paymentmethod / paymentstatus enum: PAY_LATER / CANCELLED values ─
     # ALTER TYPE ADD VALUE cannot run inside a transaction block in PostgreSQL.
-    # We must temporarily switch to AUTOCOMMIT for this single statement.
-    bind = op.get_bind()
-
-    # Check if the enum value already exists — skip if so
-    result = bind.execute(text(
-        "SELECT 1 FROM pg_enum e "
-        "JOIN pg_type t ON t.oid = e.enumtypid "
-        "WHERE t.typname = 'paymentmethod' AND e.enumlabel = 'PAY_LATER'"
-    ))
-    if not result.fetchone():
-        # Commit the current transaction first, then run in AUTOCOMMIT
-        bind.execute(text("COMMIT"))
-        bind.execute(text("ALTER TYPE paymentmethod ADD VALUE IF NOT EXISTS 'PAY_LATER'"))
-        # Start a new transaction so Alembic's cleanup doesn't crash
-        bind.execute(text("BEGIN"))
-
-    # ── paymentstatus enum: CANCELLED value ──────────────────────────────
-    result2 = bind.execute(text(
-        "SELECT 1 FROM pg_enum e "
-        "JOIN pg_type t ON t.oid = e.enumtypid "
-        "WHERE t.typname = 'paymentstatus' AND e.enumlabel = 'CANCELLED'"
-    ))
-    if not result2.fetchone():
-        bind.execute(text("COMMIT"))
-        bind.execute(text("ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'CANCELLED'"))
-        bind.execute(text("BEGIN"))
+    # Use Alembic's autocommit_block() — the correct API for async engines.
+    with op.get_context().autocommit_block():
+        op.execute(text("ALTER TYPE paymentmethod ADD VALUE IF NOT EXISTS 'PAY_LATER'"))
+        op.execute(text("ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'CANCELLED'"))
 
 
 def downgrade():

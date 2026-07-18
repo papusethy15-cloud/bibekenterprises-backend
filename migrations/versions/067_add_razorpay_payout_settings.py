@@ -16,6 +16,7 @@ Keys added (value starts empty / false) under group 'payment':
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import text
 
 revision = '067'
 down_revision = '066'
@@ -24,7 +25,7 @@ depends_on = None
 
 
 def upgrade():
-    op.execute("""
+    op.execute(text("""
         INSERT INTO system_settings (id, "group", key, value, is_secret, label, created_at, updated_at, is_active)
         VALUES
           (gen_random_uuid(), 'payment', 'razorpay_payout_enabled',   'false',   false, 'Enable automatic payouts via Razorpay X (true/false)', now(), now(), true),
@@ -33,11 +34,11 @@ def upgrade():
           (gen_random_uuid(), 'payment', 'razorpay_x_account_number', '',        false, 'Razorpay X fund account number for outgoing payouts',  now(), now(), true),
           (gen_random_uuid(), 'payment', 'withdrawal_payout_mode',    'manual',  false, 'Payout mode: manual or razorpay',                      now(), now(), true)
         ON CONFLICT ("group", key) DO NOTHING;
-    """)
+    """))
 
 
 def downgrade():
-    op.execute("""
+    op.execute(text("""
         DELETE FROM system_settings
         WHERE "group" = 'payment'
           AND key IN (
@@ -47,4 +48,4 @@ def downgrade():
             'razorpay_x_account_number',
             'withdrawal_payout_mode'
           );
-    """)
+    """))

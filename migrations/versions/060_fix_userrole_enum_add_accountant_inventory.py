@@ -31,16 +31,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    for val in ('ACCOUNTANT', 'INVENTORY_MANAGER'):
-        result = bind.execute(text(
-            "SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
-            f"WHERE t.typname = 'userrole' AND e.enumlabel = '{val}'"
-        ))
-        if not result.fetchone():
-            bind.execute(text("COMMIT"))
-            bind.execute(text(f"ALTER TYPE userrole ADD VALUE IF NOT EXISTS '{val}'"))
-            bind.execute(text("BEGIN"))
+    # ALTER TYPE ADD VALUE requires autocommit — use Alembic's autocommit_block
+    with op.get_context().autocommit_block():
+        op.execute(text("ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'ACCOUNTANT'"))
+        op.execute(text("ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'INVENTORY_MANAGER'"))
     print("[060] userrole enum: ACCOUNTANT and INVENTORY_MANAGER ensured")
 
 

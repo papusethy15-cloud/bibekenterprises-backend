@@ -15,6 +15,7 @@ Revision ID: 040
 Revises: 039
 """
 from alembic import op
+from sqlalchemy import text
 
 revision = "040"
 down_revision = "039"
@@ -23,11 +24,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("""
+    op.execute(text("""
         ALTER TABLE bookings
             ADD COLUMN IF NOT EXISTS inspection_submitted_by VARCHAR(20)
-    """)
+    """))
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE bookings DROP COLUMN IF EXISTS inspection_submitted_by")
+    op.execute(text("ALTER TABLE bookings DROP COLUMN IF EXISTS inspection_submitted_by"))

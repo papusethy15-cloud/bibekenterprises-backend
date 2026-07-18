@@ -60,50 +60,66 @@ depends_on = None
 
 
 def upgrade():
+    from sqlalchemy import text as _t
     # ── technicians table ────────────────────────────────────────────────
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP WITH TIME ZONE")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS auto_assign_eligible BOOLEAN NOT NULL DEFAULT TRUE")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS alternate_mobile VARCHAR(20)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS dob DATE")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS gender VARCHAR(10)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS pincode VARCHAR(10)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS identity_type VARCHAR(50)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS identity_number VARCHAR(50)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS emergency_contact_name VARCHAR(150)")
-    op.execute("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS emergency_contact_mobile VARCHAR(20)")
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP WITH TIME ZONE"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS auto_assign_eligible BOOLEAN NOT NULL DEFAULT TRUE"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS alternate_mobile VARCHAR(20)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS dob DATE"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS gender VARCHAR(10)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS pincode VARCHAR(10)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS identity_type VARCHAR(50)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS identity_number VARCHAR(50)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS emergency_contact_name VARCHAR(150)"))
+    op.execute(_t("ALTER TABLE technicians ADD COLUMN IF NOT EXISTS emergency_contact_mobile VARCHAR(20)"))
 
     # ── users table ──────────────────────────────────────────────────────
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)")
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128)")
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS id_proof_url VARCHAR(500)")
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS address_proof_url VARCHAR(500)")
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS id_proof_type VARCHAR(50)")
-    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS address_proof_type VARCHAR(50)")
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500)"))
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128)"))
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS id_proof_url VARCHAR(500)"))
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS address_proof_url VARCHAR(500)"))
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS id_proof_type VARCHAR(50)"))
+    op.execute(_t("ALTER TABLE users ADD COLUMN IF NOT EXISTS address_proof_type VARCHAR(50)"))
 
-    # Unique constraint on firebase_uid — skip if already exists
-    try:
-        op.create_unique_constraint('uq_users_firebase_uid', 'users', ['firebase_uid'])
-    except Exception:
-        pass
+    # Unique constraint on firebase_uid — use DO $$ to avoid try/except aborting transaction
+    op.execute(_t("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'uq_users_firebase_uid'
+            ) THEN
+                ALTER TABLE users ADD CONSTRAINT uq_users_firebase_uid UNIQUE (firebase_uid);
+            END IF;
+        END $$;
+    """))
 
     # ── services table ───────────────────────────────────────────────────
-    op.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0")
-    op.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS suggested_by_tech UUID")
+    op.execute(_t("ALTER TABLE services ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0"))
+    op.execute(_t("ALTER TABLE services ADD COLUMN IF NOT EXISTS suggested_by_tech UUID"))
 
     # ── quotation_service_items table ────────────────────────────────────
-    op.execute("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0")
-    op.execute("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS custom_service_name TEXT")
-    op.execute("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS tech_commission_override FLOAT")
+    op.execute(_t("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS is_pending_verify INTEGER NOT NULL DEFAULT 0"))
+    op.execute(_t("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS custom_service_name TEXT"))
+    op.execute(_t("ALTER TABLE quotation_service_items ADD COLUMN IF NOT EXISTS tech_commission_override FLOAT"))
 
-    # Make service_id nullable (already idempotent for nullable columns)
-    try:
-        op.alter_column('quotation_service_items', 'service_id', nullable=True)
-    except Exception:
-        pass
+    # Make service_id nullable — use DO $$ to avoid try/except aborting transaction
+    op.execute(_t("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'quotation_service_items'
+                  AND column_name = 'service_id' AND is_nullable = 'NO'
+            ) THEN
+                ALTER TABLE quotation_service_items ALTER COLUMN service_id DROP NOT NULL;
+            END IF;
+        END $$;
+    """))
 
 
 def downgrade():
