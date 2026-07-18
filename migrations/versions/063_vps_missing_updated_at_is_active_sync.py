@@ -18,6 +18,9 @@ depends_on = None
 
 
 def upgrade():
+    # Each ALTER TABLE is wrapped in its own DO $$ BEGIN ... EXCEPTION WHEN OTHERS THEN NULL END $$
+    # block so that missing-table / already-exists errors are handled at the PostgreSQL level
+    # (proper per-statement rollback) without ever aborting the outer Alembic transaction.
     stmts = [
         # appliance_brands
         "ALTER TABLE appliance_brands ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
@@ -37,14 +40,14 @@ def upgrade():
         # brand_categories
         "ALTER TABLE brand_categories ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE brand_categories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
-        # commission_group_assignments
+        # commission_group_assignments (table may not exist on fresh DB — DO $$ handles it)
         "ALTER TABLE commission_group_assignments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()",
         "ALTER TABLE commission_group_assignments ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE commission_group_assignments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
-        # commission_group_part_rules
+        # commission_group_part_rules (table may not exist on fresh DB)
         "ALTER TABLE commission_group_part_rules ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE commission_group_part_rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
-        # commission_group_rules
+        # commission_group_rules (table may not exist on fresh DB)
         "ALTER TABLE commission_group_rules ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE commission_group_rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
         # commission_rules
@@ -102,11 +105,18 @@ def upgrade():
         "ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
     ]
 
+    # Wrap each statement in a DO $$ block so that errors (missing table, etc.) are
+    # caught at the PostgreSQL savepoint level — never aborts the outer transaction.
     for stmt in stmts:
-        try:
-            op.execute(sa.text(stmt))
-        except Exception as e:
-            print(f"[SKIP] {stmt[:60]}... -> {e}")
+        safe = stmt.replace("'", "''")
+        op.execute(sa.text(f"""
+            DO $$
+            BEGIN
+                {stmt};
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END $$;
+        """))
 
 
 def downgrade():
