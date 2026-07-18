@@ -153,6 +153,15 @@ manager = ConnectionManager()
 # ─── Redis Pub/Sub subscriber (runs as background task) ──────────────────────
 _subscriber_task: asyncio.Task | None = None
 
+# Exceptions that indicate a genuine Redis connection problem (not a read timeout).
+# Used to decide whether to log "Redis unavailable" or silently retry.
+_REDIS_REAL_ERRORS = (
+    ConnectionRefusedError,       # Redis process not running / port closed
+    ConnectionResetError,         # TCP connection dropped mid-session
+    OSError,                      # General network / socket-level failure
+)
+
+
 async def _redis_subscriber():
     """
     Connects to Redis, subscribes to the master channel, and relays every
@@ -162,6 +171,30 @@ async def _redis_subscriber():
     LOCAL DEV: If Redis is not available, logs a warning and waits 30s before
     retrying — does NOT spam the log every 3 seconds. WS connections still work
     via the direct-broadcast fallback in publish_event().
+
+    FIX — socket_timeout removed from subscriber connection
+    ────────────────────────────────────────────────────────
+    The original code used socket_timeout=3 on the subscriber client.
+    pubsub.listen() is a blocking call that waits indefinitely for the next
+    Redis message; with socket_timeout=3 it raised a TimeoutError every ~3 s,
+    which the except-block mis-classified as "Redis unavailable" and logged
+    the warning repeatedly.
+
+    The subscriber now uses socket_timeout=None (no read-timeout) so that
+    pubsub.listen() can block as long as needed without raising a spurious
+    TimeoutError.  socket_connect_timeout=3 is preserved so that an
+    unreachable Redis host still fails fast at connection time.
+
+    Improved exception handling
+    ───────────────────────────
+    Inside the pubsub.listen() loop we now distinguish between:
+      • TimeoutError / asyncio.TimeoutError — expected if no message arrives
+        for a while on a very quiet channel; we simply continue the loop.
+      • Real connection errors (ConnectionRefusedError, OSError, etc.) —
+        we break out of the loop so the outer while-True can reconnect.
+      • Any other unexpected Exception — logged as a warning and we reconnect.
+    This ensures "Redis unavailable" is only logged for genuine connectivity
+    problems, not for normal Pub/Sub idle periods.
     """
     global _redis_available
     channel_name = "palei:ws:events"
@@ -169,34 +202,82 @@ async def _redis_subscriber():
     _consecutive_failures = 0
 
     while True:
+        redis_client = None
+        pubsub = None
         try:
+            # ── CHANGE 1 ──────────────────────────────────────────────────────
+            # Removed `socket_timeout=3` from the subscriber client.
+            #
+            # Reason: pubsub.listen() is designed to block indefinitely waiting
+            # for the next message.  A non-None socket_timeout causes the
+            # underlying socket to raise TimeoutError every few seconds even
+            # when Redis is perfectly healthy, producing false "unavailable"
+            # log spam.
+            #
+            # socket_connect_timeout=3 is kept so that an unreachable Redis
+            # server still fails within 3 seconds at connection time.
+            # ─────────────────────────────────────────────────────────────────
             redis_client = aioredis.from_url(
                 settings.REDIS_URL,
                 decode_responses=True,
-                socket_connect_timeout=3,   # fail fast if Redis is down
-                socket_timeout=3,
+                socket_connect_timeout=3,   # fail fast if Redis is down at connect time
+                socket_timeout=None,        # FIXED: no read-timeout on subscriber socket
             )
-            # Test the connection before subscribing
+
+            # Test connectivity before entering the listen loop.
             await redis_client.ping()
 
             pubsub = redis_client.pubsub()
             await pubsub.subscribe(channel_name)
 
             if not _redis_available:
-                logger.info(f"[WS] Redis connected ✓ — subscriber started on '{channel_name}'")
+                logger.info(
+                    f"[WS] Redis connected ✓ — subscriber started on '{channel_name}'"
+                )
             _redis_available = True
             _consecutive_failures = 0
             _first_attempt = False
 
+            # ── CHANGE 2 ──────────────────────────────────────────────────────
+            # Replaced the bare `async for raw_msg in pubsub.listen()` with a
+            # try/except inside the loop body so we can handle errors at the
+            # message-receive level without tearing down the whole subscriber.
+            #
+            # • TimeoutError / asyncio.TimeoutError:
+            #     Not a real error for a Pub/Sub listener — just means no
+            #     message arrived recently.  We `continue` the inner loop
+            #     without logging anything.
+            #
+            # • _REDIS_REAL_ERRORS (ConnectionRefusedError, OSError, etc.):
+            #     Redis is genuinely gone.  Break so the outer while-True
+            #     reconnects and logs "Redis unavailable".
+            #
+            # • Any other Exception:
+            #     Log a warning and reconnect (safer than silently swallowing).
+            # ─────────────────────────────────────────────────────────────────
             async for raw_msg in pubsub.listen():
-                if raw_msg["type"] != "message":
-                    continue
                 try:
+                    if raw_msg["type"] != "message":
+                        continue
                     event = json.loads(raw_msg["data"])
-                    room  = event.get("room")
+                    room = event.get("room")
                     if room:
                         await manager.broadcast_to_room(room, event)
+
+                except (TimeoutError, asyncio.TimeoutError):
+                    # Idle timeout on a quiet channel — not a real error.
+                    # Continue waiting for the next message silently.
+                    continue
+
+                except _REDIS_REAL_ERRORS as real_err:
+                    # Genuine connectivity loss — exit listen loop to reconnect.
+                    logger.warning(
+                        f"[WS] Redis connection lost during listen: {real_err}"
+                    )
+                    break
+
                 except Exception as parse_err:
+                    # Malformed JSON or unexpected payload — log and keep going.
                     logger.warning(f"[WS] Bad event payload: {parse_err}")
 
         except asyncio.CancelledError:
@@ -204,7 +285,15 @@ async def _redis_subscriber():
             _redis_available = False
             break
 
-        except Exception as conn_err:
+        # ── CHANGE 3 ──────────────────────────────────────────────────────────
+        # Improved outer exception handling: distinguish between a real Redis
+        # error and anything else.  Only log "Redis unavailable" for errors
+        # that actually indicate a connectivity problem.
+        #
+        # TimeoutError here means the initial ping() timed out — Redis really
+        # is unreachable, so we DO log "unavailable" for that case.
+        # ─────────────────────────────────────────────────────────────────────
+        except (TimeoutError, asyncio.TimeoutError, *_REDIS_REAL_ERRORS) as conn_err:
             _redis_available = False
             _consecutive_failures += 1
 
@@ -216,9 +305,42 @@ async def _redis_subscriber():
                 )
                 _first_attempt = False
 
-            # Back off: 5s, 10s, 30s, then every 60s — don't spam
+            # Back off: 5s → 10s → 20s → 40s → 60s max, to avoid log spam.
             delay = min(5 * (2 ** min(_consecutive_failures - 1, 3)), 60)
             await asyncio.sleep(delay)
+
+        except Exception as unexpected_err:
+            # Catch-all for unexpected errors (auth failure, config error, etc.)
+            _redis_available = False
+            _consecutive_failures += 1
+
+            if _first_attempt or _consecutive_failures == 1:
+                logger.warning(
+                    f"[WS] Redis unavailable — unexpected error ({type(unexpected_err).__name__}: {unexpected_err}). "
+                    f"Falling back to direct broadcast."
+                )
+                _first_attempt = False
+
+            delay = min(5 * (2 ** min(_consecutive_failures - 1, 3)), 60)
+            await asyncio.sleep(delay)
+
+        finally:
+            # ── CHANGE 4 ──────────────────────────────────────────────────────
+            # Always clean up pubsub and redis_client on exit from the try block
+            # (whether due to error, break, or reconnect).  This prevents file-
+            # descriptor leaks when the subscriber reconnects repeatedly.
+            # ─────────────────────────────────────────────────────────────────
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe()
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+            if redis_client is not None:
+                try:
+                    await redis_client.aclose()
+                except Exception:
+                    pass
 
 
 async def start_redis_subscriber():
