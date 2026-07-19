@@ -792,3 +792,162 @@ async def upsert_domain_service_override(
     await db.commit()
     await db.refresh(override)
     return success_response(data=_override_row(override), message="Override saved")
+
+
+# ── Bulk override download (generate JSON template) ───────────
+class BulkOverrideDownloadRequest(BaseModel):
+    service_ids: list[str]  # list of domain_service_ids to include
+
+
+@router.post("/{domain_id}/services/overrides/download",
+             summary="Generate bulk override JSON template [Admin]")
+async def bulk_override_download(
+    domain_id: UUID,
+    payload:   BulkOverrideDownloadRequest,
+    current_user = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns a JSON array of override objects for the requested domain_service_ids.
+    Services that already have override data will have those values populated;
+    services without overrides will have empty/null fields ready to fill.
+    """
+    import json as _json
+
+    result = []
+    for ds_id_str in payload.service_ids:
+        try:
+            ds_id = UUID(ds_id_str)
+        except Exception:
+            continue
+
+        row = (await db.execute(
+            select(DomainService, Service)
+            .join(Service, Service.id == DomainService.service_id)
+            .where(
+                DomainService.id == ds_id,
+                DomainService.domain_id == domain_id,
+                DomainService.is_active == True,
+            )
+        )).first()
+        if not row:
+            continue
+
+        ds, svc = row
+
+        override = (await db.execute(
+            select(DomainServiceOverride).where(DomainServiceOverride.domain_service_id == ds_id)
+        )).scalar_one_or_none()
+
+        def _jlist(v):
+            if not v: return []
+            try: return _json.loads(v)
+            except: return []
+
+        cat = (await db.execute(
+            select(ServiceCategory).where(ServiceCategory.id == svc.category_id)
+        )).scalar_one_or_none()
+
+        entry = {
+            "domain_service_id":     str(ds_id),
+            "service_id":            str(svc.id),
+            "service_name":          svc.name,
+            "category_name":         cat.name if cat else None,
+            "has_existing_override": override is not None,
+            "meta_title":            override.meta_title       if override else None,
+            "meta_description":      override.meta_description if override else None,
+            "meta_keywords":         override.meta_keywords     if override else None,
+            "og_title":              override.og_title          if override else None,
+            "og_description":        override.og_description    if override else None,
+            "og_image_url":          override.og_image_url      if override else None,
+            "includes":              _jlist(override.includes_json if override else None),
+            "excludes":              _jlist(override.excludes_json if override else None),
+            "faqs":                  _jlist(override.faqs_json     if override else None),
+        }
+        result.append(entry)
+
+    return success_response(data=result, message=f"{len(result)} service override(s) exported")
+
+
+# ── Bulk override upload (apply JSON template) ────────────────
+class BulkOverrideItem(BaseModel):
+    domain_service_id: str
+    meta_title:        Optional[str] = None
+    meta_description:  Optional[str] = None
+    meta_keywords:     Optional[str] = None
+    og_title:          Optional[str] = None
+    og_description:    Optional[str] = None
+    og_image_url:      Optional[str] = None
+    includes:          list = []
+    excludes:          list = []
+    faqs:              list = []
+
+class BulkOverrideUploadRequest(BaseModel):
+    overrides: list[BulkOverrideItem]
+
+
+@router.post("/{domain_id}/services/overrides/upload",
+             summary="Bulk upsert service overrides (SEO + Content only) [Admin]")
+async def bulk_override_upload(
+    domain_id: UUID,
+    payload:   BulkOverrideUploadRequest,
+    current_user = Depends(AdminOnly),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Accepts a list of override objects and upserts SEO + Content fields.
+    Does NOT touch image_url / thumbnail_url (those are uploaded per service manually).
+    """
+    import json as _json
+
+    updated = 0
+    skipped = 0
+    errors  = []
+
+    for item in payload.overrides:
+        try:
+            ds_id = UUID(item.domain_service_id)
+        except Exception:
+            errors.append(f"Invalid UUID: {item.domain_service_id}")
+            skipped += 1
+            continue
+
+        ds = (await db.execute(
+            select(DomainService).where(
+                DomainService.id == ds_id,
+                DomainService.domain_id == domain_id,
+                DomainService.is_active == True,
+            )
+        )).scalar_one_or_none()
+
+        if not ds:
+            errors.append(f"Domain service link not found: {item.domain_service_id}")
+            skipped += 1
+            continue
+
+        override = (await db.execute(
+            select(DomainServiceOverride).where(DomainServiceOverride.domain_service_id == ds_id)
+        )).scalar_one_or_none()
+
+        if not override:
+            override = DomainServiceOverride(domain_service_id=ds_id)
+            db.add(override)
+
+        override.meta_title       = item.meta_title
+        override.meta_description = item.meta_description
+        override.meta_keywords    = item.meta_keywords
+        override.og_title         = item.og_title
+        override.og_description   = item.og_description
+        override.og_image_url     = item.og_image_url
+        override.includes_json    = _json.dumps(item.includes or [])
+        override.excludes_json    = _json.dumps(item.excludes or [])
+        override.faqs_json        = _json.dumps(item.faqs     or [])
+
+        updated += 1
+
+    await db.commit()
+
+    return success_response(
+        data={"updated": updated, "skipped": skipped, "errors": errors},
+        message=f"{updated} override(s) saved successfully"
+    )
