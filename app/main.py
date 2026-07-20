@@ -29,24 +29,35 @@ async def _auto_migrate():
             print(f"[INFO] Auto-migrate: connecting to {_safe_url}")
 
             # ── EARLY EXIT: skip alembic entirely if already at head ──────
-            # This prevents the "Aborted!" in stderr on every restart.
-            # alembic command.upgrade() invokes Click's CLI machinery which
-            # calls sys.exit() on certain conditions → Click prints "Aborted!"
-            # to stderr. We avoid calling it at all if the DB is already at head.
-            # Uses subprocess psql (always available on VPS) for the version check.
-            CURRENT_HEAD = "074_add_customer_review_fields"
+            # Dynamically resolves the current head revision from the migration
+            # scripts so this check never needs manual updates when new migrations
+            # are added. Falls back to running alembic if anything goes wrong.
             try:
                 import subprocess as _sp
-                _pg_url = _s.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-                _vcheck = _sp.run(
-                    ["psql", _pg_url, "-t", "-A", "-c",
-                     f"SELECT COUNT(*) FROM alembic_version WHERE version_num = '{CURRENT_HEAD}'"],
-                    capture_output=True, text=True, timeout=10
+                backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                ini_path = os.path.join(backend_dir, "alembic.ini")
+                # Get the actual head revision from alembic
+                _head_result = _sp.run(
+                    ["python3", "-m", "alembic", "-c", ini_path, "heads", "--resolve-dependencies"],
+                    capture_output=True, text=True, timeout=15, cwd=backend_dir
                 )
-                _already_at_head = _vcheck.returncode == 0 and _vcheck.stdout.strip() == "1"
-                if _already_at_head:
-                    print("[OK] Auto-migrate: all Alembic migrations applied (head)")
-                    return
+                _head_rev = None
+                if _head_result.returncode == 0 and _head_result.stdout.strip():
+                    # Output is like "075 (head)" — extract the revision
+                    _head_line = _head_result.stdout.strip().split("\n")[-1]
+                    _head_rev = _head_line.split()[0].strip()
+
+                if _head_rev:
+                    _pg_url = _s.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+                    _vcheck = _sp.run(
+                        ["psql", _pg_url, "-t", "-A", "-c",
+                         f"SELECT COUNT(*) FROM alembic_version WHERE version_num = '{_head_rev}'"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    _already_at_head = _vcheck.returncode == 0 and _vcheck.stdout.strip() == "1"
+                    if _already_at_head:
+                        print("[OK] Auto-migrate: all Alembic migrations applied (head)")
+                        return
             except Exception as _ve:
                 print(f"[INFO] Auto-migrate: version check skipped ({_ve}) — running alembic")
 
@@ -67,6 +78,14 @@ async def _auto_migrate():
             cfg = Config(ini_path)
             alembic_cmd.upgrade(cfg, "head")
             print("[OK] Auto-migrate: all Alembic migrations applied (head)")
+        except SystemExit as e:
+            # alembic/Click calls sys.exit() on completion or error.
+            # In a ThreadPoolExecutor thread, SystemExit is re-raised as-is.
+            # Treat exit code 0 as success, anything else as a warning.
+            if e.code == 0 or e.code is None:
+                print("[OK] Auto-migrate: alembic completed (exit 0)")
+            else:
+                print(f"[WARN] Auto-migrate: alembic exited with code {e.code}")
         except Exception as e:
             print(f"[WARN] Auto-migrate failed: {e}")
 
