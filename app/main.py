@@ -693,6 +693,38 @@ ALTER TABLE quotations ADD COLUMN IF NOT EXISTS services_total   FLOAT DEFAULT 0
 ALTER TABLE quotations ADD COLUMN IF NOT EXISTS labour_charges   FLOAT DEFAULT 0.0;
 ALTER TABLE quotations ADD COLUMN IF NOT EXISTS service_charges  FLOAT DEFAULT 0.0;
 ALTER TABLE quotations ADD COLUMN IF NOT EXISTS adjustment_amount FLOAT DEFAULT 0.0;
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS payment_id UUID;
+ALTER TABLE wallets ADD COLUMN IF NOT EXISTS technician_id UUID;
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS min_order_amount FLOAT DEFAULT 0.0;
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS max_discount_amount FLOAT;
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS customer_mobile_numbers TEXT[];
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS service_ids UUID[];
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS category_ids UUID[];
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS per_customer_limit INTEGER;
+ALTER TABLE amc_plans ADD COLUMN IF NOT EXISTS plan_type VARCHAR(30) DEFAULT 'GOLD';
+ALTER TABLE amc_subscriptions ADD COLUMN IF NOT EXISTS visits_remaining INTEGER DEFAULT 0;
+ALTER TABLE warranties ADD COLUMN IF NOT EXISTS parts_covered TEXT;
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code VARCHAR(20);
+ALTER TABLE warehouses ADD COLUMN IF NOT EXISTS city_id UUID;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS callback_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mobile VARCHAR(20) NOT NULL,
+    name VARCHAR(150),
+    message TEXT,
+    source VARCHAR(30) DEFAULT 'CHATBOT',
+    status VARCHAR(30) DEFAULT 'PENDING',
+    admin_notes TEXT,
+    called_at TIMESTAMP WITHOUT TIME ZONE,
+    domain_id UUID,
+    page_url VARCHAR(500),
+    ip_address VARCHAR(64),
+    user_agent VARCHAR(500),
+    location VARCHAR(255),
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    is_active BOOLEAN DEFAULT TRUE
+);
 """
 
     try:
