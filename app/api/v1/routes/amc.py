@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from uuid import UUID
-from app.utils.timezone import now_ist
+from app.utils.timezone import now_ist, now_naive
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
@@ -89,7 +89,7 @@ async def schedule_visit(payload: AMCVisitRequest, current_user: dict = Depends(
 async def renewals_due(days: int = Query(30), current_user: dict = Depends(AdminOrCCO), db: AsyncSession = Depends(get_db)):
     from app.models.amc import AMCSubscription
     from datetime import timedelta
-    cutoff = now_ist() + timedelta(days=days)
+    cutoff = now_naive() + timedelta(days=days)
     items = (await db.execute(select(AMCSubscription).where(AMCSubscription.end_date <= cutoff,
                                                              AMCSubscription.is_active == True))).scalars().all()
     return success_response(data=[{"id": str(s.id), "customer_id": str(s.customer_id),
