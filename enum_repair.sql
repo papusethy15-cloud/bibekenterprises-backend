@@ -124,3 +124,16 @@ ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'INVENTORY_MANAGER';
 ALTER TYPE warrantystatus ADD VALUE IF NOT EXISTS 'ACTIVE';
 ALTER TYPE warrantystatus ADD VALUE IF NOT EXISTS 'EXPIRED';
 ALTER TYPE warrantystatus ADD VALUE IF NOT EXISTS 'CLAIMED';
+
+-- callbackstatus (added 2026-07-21 — was missing, caused chatbot callback 500 error)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'callbackstatus') THEN
+        CREATE TYPE callbackstatus AS ENUM ('PENDING', 'CALLED', 'RESOLVED', 'SKIPPED');
+    END IF;
+END
+$$;
+ALTER TYPE callbackstatus ADD VALUE IF NOT EXISTS 'PENDING';
+ALTER TYPE callbackstatus ADD VALUE IF NOT EXISTS 'CALLED';
+ALTER TYPE callbackstatus ADD VALUE IF NOT EXISTS 'RESOLVED';
+ALTER TYPE callbackstatus ADD VALUE IF NOT EXISTS 'SKIPPED';
