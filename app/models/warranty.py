@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Enum as SAEnum
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 import enum
 from app.models.base import BaseModel
@@ -22,7 +22,7 @@ class Warranty(BaseModel):
     description    = Column(Text, nullable=False)
     expiry_date    = Column(DateTime, nullable=False)
     parts_covered  = Column(Text, nullable=True)
-    status         = Column(SAEnum(WarrantyStatus), default=WarrantyStatus.ACTIVE)
+    status         = Column(String(20), default="ACTIVE")
 
 class WarrantyClaim(BaseModel):
     __tablename__ = "warranty_claims"
@@ -30,7 +30,7 @@ class WarrantyClaim(BaseModel):
     claimed_by   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     booking_id   = Column(UUID(as_uuid=True), ForeignKey("bookings.id"), nullable=True)
     description  = Column(Text, nullable=False)
-    status       = Column(SAEnum(ClaimStatus), default=ClaimStatus.PENDING)
+    status       = Column(String(20), default="PENDING")
     approved_by  = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     rejected_by  = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     notes        = Column(Text, nullable=True)

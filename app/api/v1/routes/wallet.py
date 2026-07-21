@@ -40,12 +40,16 @@ async def _get_or_create_wallet(db, *, user_id=None, technician_id=None):
         if not w:
             w = Wallet(technician_id=technician_id, user_id=user_id, balance=0.0,
                        total_earned=0.0, total_withdrawn=0.0)
-            db.add(w); await db.flush()
+            db.add(w)
+            await db.commit()
+            await db.refresh(w)
         return w
     w = (await db.execute(select(Wallet).where(Wallet.user_id == user_id))).scalars().first()
     if not w:
         w = Wallet(user_id=user_id, balance=0.0, total_earned=0.0, total_withdrawn=0.0)
-        db.add(w); await db.flush()
+        db.add(w)
+        await db.commit()
+        await db.refresh(w)
     return w
 
 

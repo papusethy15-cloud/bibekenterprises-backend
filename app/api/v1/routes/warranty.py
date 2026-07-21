@@ -55,12 +55,44 @@ async def get_warranty(warranty_id: UUID, current_user: dict = Depends(AnyAuthen
                                    "description": w.description, "expiry_date": iso(w.expiry_date),
                                    "parts_covered": w.parts_covered, "status": w.status})
 
+@router.get("/claims", summary="List warranty claims [Admin/CCO]")
+async def list_claims(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20),
+    status: str = Query(None),
+    current_user: dict = Depends(AdminOrCCO),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.warranty import WarrantyClaim
+    q = select(WarrantyClaim)
+    if status:
+        q = q.where(WarrantyClaim.status == status.upper())
+    q = q.order_by(WarrantyClaim.created_at.desc())
+    from sqlalchemy import func
+    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
+    items = (await db.execute(q.offset((page - 1) * per_page).limit(per_page))).scalars().all()
+    return success_response(data={
+        "items": [{
+            "id": str(c.id),
+            "warranty_id": str(c.warranty_id),
+            "claimed_by": str(c.claimed_by),
+            "description": c.description,
+            "status": c.status,
+            "notes": c.notes,
+            "created_at": iso(c.created_at),
+        } for c in items],
+        "total": total,
+        "pages": max(1, (total + per_page - 1) // per_page),
+    })
+
+
 @router.post("/claim", summary="Create warranty claim [Customer/CCO]")
 async def create_claim(payload: WarrantyClaimRequest, current_user: dict = Depends(AnyAuthenticated), db: AsyncSession = Depends(get_db)):
     from app.models.warranty import WarrantyClaim, Warranty, WarrantyStatus
     w = (await db.execute(select(Warranty).where(Warranty.id == UUID(payload.warranty_id)))).scalar_one_or_none()
     if not w: raise HTTPException(status_code=404, detail="Warranty not found")
-    if w.expiry_date < now_ist(): raise HTTPException(status_code=400, detail="Warranty has expired")
+    from app.utils.timezone import now_naive
+    if w.expiry_date < now_naive(): raise HTTPException(status_code=400, detail="Warranty has expired")
     claim = WarrantyClaim(warranty_id=UUID(payload.warranty_id), claimed_by=UUID(current_user["user_id"]),
                           description=payload.description,
                           booking_id=UUID(payload.booking_id) if payload.booking_id else None)
@@ -72,7 +104,7 @@ async def approve_claim(payload: WarrantyActionRequest, current_user: dict = Dep
     from app.models.warranty import WarrantyClaim, ClaimStatus
     claim = (await db.execute(select(WarrantyClaim).where(WarrantyClaim.id == UUID(payload.claim_id)))).scalar_one_or_none()
     if not claim: raise HTTPException(status_code=404, detail="Claim not found")
-    claim.status = ClaimStatus.APPROVED; claim.approved_by = UUID(current_user["user_id"]); claim.notes = payload.notes
+    claim.status = "APPROVED"; claim.approved_by = UUID(current_user["user_id"]); claim.notes = payload.notes
     await db.commit()
     return success_response(message="Claim approved")
 
@@ -81,6 +113,6 @@ async def reject_claim(payload: WarrantyActionRequest, current_user: dict = Depe
     from app.models.warranty import WarrantyClaim, ClaimStatus
     claim = (await db.execute(select(WarrantyClaim).where(WarrantyClaim.id == UUID(payload.claim_id)))).scalar_one_or_none()
     if not claim: raise HTTPException(status_code=404, detail="Claim not found")
-    claim.status = ClaimStatus.REJECTED; claim.rejected_by = UUID(current_user["user_id"]); claim.notes = payload.notes
+    claim.status = "REJECTED"; claim.rejected_by = UUID(current_user["user_id"]); claim.notes = payload.notes
     await db.commit()
     return success_response(message="Claim rejected")
